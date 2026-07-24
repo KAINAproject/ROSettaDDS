@@ -1391,6 +1391,97 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
+    public void Node_公開メソッドのnullableMetadata()
+    {
+        var t = typeof(Node);
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
+            .OrderBy(m => m.Name)
+            .ThenBy(m => m.GetParameters().Length)
+            .ToArray();
+
+        // Parameter nullable metadata table:
+        // (methodName, paramCount, paramIndex, paramName, isRefNullable, isOptional, hasDefault, defaultValue)
+        var paramExpectations = new (string, int, int, string, bool, bool, bool, object?)[]
+        {
+            ("CreatePublisher", 3, 2, "typeName", true, true, true, null),
+            ("CreatePublisher", 5, 4, "typeName", true, true, true, null),
+            ("CreateSubscription", 6, 3, "typeName", true, true, true, null),
+            ("CreateSubscription", 6, 4, "handlerContext", true, true, true, null),
+            ("CreateSubscription", 5, 3, "handlerContext", true, true, true, null),
+        };
+
+        // Return type nullable table:
+        // (methodName, paramCount, isVoid, isNullable)
+        var returnExpectations = new (string, int, bool, bool)[]
+        {
+            ("CreatePublisher", 3, false, false),
+            ("CreatePublisher", 5, false, false),
+            ("CreateSubscription", 6, false, false),
+            ("CreateSubscription", 5, false, false),
+            ("CreateServiceClient", 2, false, false),
+            ("CreateTopicDiagnostics", 0, false, false),
+            ("Dispose", 0, true, false),
+        };
+
+        foreach (var (methodName, paramCount, paramIndex, paramName, isRefNullable, isOptional, hasDefault, defaultValue) in paramExpectations)
+        {
+            var method = methods.First(m => m.Name == methodName && m.GetParameters().Length == paramCount);
+            var param = method.GetParameters()[paramIndex];
+            param.Name.Should().Be(paramName,
+                $"for {methodName}({paramCount} params) param[{paramIndex}]");
+            param.IsOptional.Should().Be(isOptional,
+                $"for {methodName}({paramCount} params) param[{paramIndex}] optional");
+            param.HasDefaultValue.Should().Be(hasDefault,
+                $"for {methodName}({paramCount} params) param[{paramIndex}] hasDefault");
+            param.DefaultValue.Should().Be(defaultValue,
+                $"for {methodName}({paramCount} params) param[{paramIndex}] default");
+
+            if (isRefNullable)
+            {
+                var nullableFlags = GetNullableFlags(param);
+                nullableFlags.Should().NotBeNull(
+                    $"for {methodName}({paramCount} params) param[{paramIndex}] {paramName} must have NullableAttribute");
+                nullableFlags.Should().Equal(new byte[] { 2 },
+                    $"for {methodName}({paramCount} params) param[{paramIndex}] {paramName} must be Nullable(2)");
+            }
+        }
+
+        foreach (var (methodName, paramCount, isVoid, isNullable) in returnExpectations)
+        {
+            var method = methods.First(m => m.Name == methodName && m.GetParameters().Length == paramCount);
+            if (isVoid)
+            {
+                method.ReturnType.Should().Be(typeof(void));
+                continue;
+            }
+            if (isNullable)
+            {
+                var nullableFlags = GetNullableFlags(method.ReturnParameter);
+                nullableFlags.Should().NotBeNull(
+                    $"for {methodName} return must have NullableAttribute");
+                nullableFlags.Should().Equal(new byte[] { 2 },
+                    $"for {methodName} return must be Nullable(2)");
+            }
+            else
+            {
+                var nullableFlags = GetNullableFlags(method.ReturnParameter);
+                nullableFlags.Should().BeNull(
+                    $"for {methodName} return must not have NullableAttribute");
+            }
+        }
+    }
+
+    private static byte[]? GetNullableFlags(ICustomAttributeProvider provider)
+    {
+        var attr = provider.GetCustomAttributes(false)
+            .FirstOrDefault(a => a.GetType().Name == "NullableAttribute");
+        if (attr is null) return null;
+        var field = attr.GetType().GetField("NullableFlags", BindingFlags.Public | BindingFlags.Instance);
+        return (byte[]?)field?.GetValue(attr);
+    }
+
+    [Fact]
     public void TopicDiagnostics_GetTopicInfo_nullableReturn()
     {
         var method = typeof(TopicDiagnostics).GetMethods(
@@ -1401,6 +1492,10 @@ public class TopicFrequencyMonitorTests
         var nullableAttr = method.ReturnParameter.GetCustomAttributes(false)
             .FirstOrDefault(a => a.GetType().Name == "NullableAttribute");
         nullableAttr.Should().NotBeNull("GetTopicInfo returns nullable TopicInfo?");
+        // Verify NullableAttribute byte value = 2 (nullable)
+        var flagsField = nullableAttr!.GetType().GetField("NullableFlags", BindingFlags.Public | BindingFlags.Instance);
+        var flags = (byte[]?)flagsField?.GetValue(nullableAttr);
+        flags.Should().Equal(new byte[] { 2 }, "GetTopicInfo return must have Nullable(2) = nullable");
     }
 
     [Fact]

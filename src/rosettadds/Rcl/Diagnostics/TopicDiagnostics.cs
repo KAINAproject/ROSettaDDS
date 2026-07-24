@@ -16,7 +16,9 @@ namespace ROSettaDDS.Rcl.Diagnostics
         private readonly Context _context;
         private readonly List<TopicFrequencyMonitor> _monitors = new();
         private readonly object _monitorsLock = new();
-        private bool _disposed;
+        private int _disposed;
+        private readonly ManualResetEventSlim _disposeCompletedGate = new();
+        private Exception? _disposeException;
 
         /// <summary>Test seam: records lifecycle events for verification.</summary>
     internal Action<string>? TestEventRecorder { get; set; }
@@ -77,7 +79,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
             var monitor = new TopicFrequencyMonitor(_node, ddsTopic, ddsTypeName, options, SystemClock.Instance);
             lock (_monitorsLock)
             {
-                if (_disposed || _node.IsDisposed)
+                if (_disposed != 0 || _node.IsDisposed)
                 {
                     monitor.Dispose();
                     ThrowIfDisposed();
@@ -89,23 +91,45 @@ namespace ROSettaDDS.Rcl.Diagnostics
 
         public void Dispose()
         {
-            if (_disposed) return;
-            _disposed = true;
-            TestEventRecorder?.Invoke("TopicDiagnosticsDisposeStart");
-            TopicFrequencyMonitor[] snapshot;
-            lock (_monitorsLock)
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
-                snapshot = _monitors.ToArray();
-                _monitors.Clear();
+                _disposeCompletedGate.Wait();
+                if (_disposeException is not null)
+                {
+                    throw new AggregateException(
+                        "TopicDiagnostics.Dispose failed on the first call and is propagated here.",
+                        _disposeException);
+                }
+                return;
             }
-            foreach (var m in snapshot)
-                m.Dispose();
-            TestEventRecorder?.Invoke("TopicDiagnosticsDisposeEnd");
+
+            try
+            {
+                TestEventRecorder?.Invoke("TopicDiagnosticsDisposeStart");
+                TopicFrequencyMonitor[] snapshot;
+                lock (_monitorsLock)
+                {
+                    snapshot = _monitors.ToArray();
+                    _monitors.Clear();
+                }
+                foreach (var m in snapshot)
+                    m.Dispose();
+                TestEventRecorder?.Invoke("TopicDiagnosticsDisposeEnd");
+            }
+            catch (Exception ex)
+            {
+                _disposeException = ex;
+                throw;
+            }
+            finally
+            {
+                _disposeCompletedGate.Set();
+            }
         }
 
         private void ThrowIfDisposed()
         {
-            if (_disposed) throw new ObjectDisposedException(GetType().Name);
+            if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(GetType().Name);
             if (_node.IsDisposed) throw new ObjectDisposedException(GetType().Name);
         }
 

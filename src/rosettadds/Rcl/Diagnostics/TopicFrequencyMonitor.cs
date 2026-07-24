@@ -16,6 +16,8 @@ public sealed class TopicFrequencyMonitor : IDisposable
     private int _head;
     private int _count;
     private int _disposed;
+    private readonly ManualResetEventSlim _disposeCompletedGate = new();
+    private Exception? _disposeException;
 
     internal TopicFrequencyMonitor(TopicFrequencyOptions options, IClock clock)
     {
@@ -161,10 +163,32 @@ public sealed class TopicFrequencyMonitor : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            _disposeCompletedGate.Wait();
+            if (_disposeException is not null)
+            {
+                throw new AggregateException(
+                    "TopicFrequencyMonitor.Dispose failed on the first call and is propagated here.",
+                    _disposeException);
+            }
             return;
-        _disposeCts.Cancel();
-        _disposeCts.Dispose();
-        _rawSub?.Dispose();
+        }
+
+        try
+        {
+            _disposeCts.Cancel();
+            _disposeCts.Dispose();
+            _rawSub?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _disposeException = ex;
+            throw;
+        }
+        finally
+        {
+            _disposeCompletedGate.Set();
+        }
     }
 
     private void OnPayload(ReadOnlyMemory<byte> _, GuidPrefix __)

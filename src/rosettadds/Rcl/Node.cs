@@ -101,9 +101,9 @@ public sealed class Node : IDisposable
         string? typeName = null)
     {
         BeginRegistration();
-        BeforeCreateStartCallback?.Invoke();
         try
         {
+            BeforeCreateStartCallback?.Invoke();
             if (string.IsNullOrEmpty(topicName)) throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
             if (serializer is null) throw new ArgumentNullException(nameof(serializer));
             return CreateWriterInternal(
@@ -125,9 +125,9 @@ public sealed class Node : IDisposable
         ReliabilityQos? reliability = null)
     {
         BeginRegistration();
-        BeforeCreateStartCallback?.Invoke();
         try
         {
+            BeforeCreateStartCallback?.Invoke();
             if (string.IsNullOrEmpty(topicName)) throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
             if (serializer is null) throw new ArgumentNullException(nameof(serializer));
             if (handler is null) throw new ArgumentNullException(nameof(handler));
@@ -216,9 +216,9 @@ public sealed class Node : IDisposable
         DurabilityQos durability)
     {
         BeginRegistration();
-        BeforeCreateStartCallback?.Invoke();
         try
         {
+            BeforeCreateStartCallback?.Invoke();
             if (string.IsNullOrEmpty(ddsTopic)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTopic));
             if (string.IsNullOrEmpty(ddsTypeName)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTypeName));
             if (callback is null) throw new ArgumentNullException(nameof(callback));
@@ -285,9 +285,9 @@ public sealed class Node : IDisposable
         string serviceName)
     {
         BeginRegistration();
-        BeforeCreateStartCallback?.Invoke();
         try
         {
+            BeforeCreateStartCallback?.Invoke();
             if (descriptor is null) throw new ArgumentNullException(nameof(descriptor));
             if (string.IsNullOrEmpty(serviceName)) throw new ArgumentException("Value cannot be null or empty.", nameof(serviceName));
             var requestPublisher = CreateWriterInternal(

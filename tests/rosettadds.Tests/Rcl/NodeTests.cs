@@ -298,6 +298,28 @@ public class NodeTests
     }
 
     [Fact]
+    public void BeforeCreateStartCallbackが例外を投げてもDisposeが完了する()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "callback_ex_test");
+
+        node.BeforeCreateStartCallback = () => throw new InvalidOperationException("callback failed");
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            node.CreatePublisher<StringMessage>(
+                "chatter", StringMessageSerializer.Instance, StringMessage.DdsTypeName));
+        Assert.Equal("callback failed", ex.Message);
+
+        Assert.Equal(0, GetPendingRegistrationsField(node));
+
+        node.Dispose();
+        Assert.True(node.IsDisposed);
+
+        node.BeforeCreateStartCallback = null;
+    }
+
+    [Fact]
     public void CreatePublisher_phase2_match_failure_rolls_back()
     {
         using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });

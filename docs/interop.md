@@ -237,15 +237,15 @@ catch (OperationCanceledException)
 ### 検証手順
 
 ```sh
-# シェル 1: BestEffort sensor-data 10 Hz
+# シェル 1: BestEffort sensor-data 10 Hz (Ctrl-C で停止)
 ros2 topic pub /sensor_data std_msgs/msg/String "data: 's-{01}'" \
-  --qos-reliability best_effort --qos-durability volatile --rate 10 --max-messages 100
+  --qos-reliability best_effort --qos-durability volatile --rate 10
 
-# シェル 2: Reliable 100 Hz
+# シェル 2: Reliable 100 Hz (Ctrl-C で停止)
 ros2 topic pub /reliable_data std_msgs/msg/String "data: 'f-{01}'" \
-  --qos-reliability reliable --qos-durability volatile --rate 100 --max-messages 1000
+  --qos-reliability reliable --qos-durability volatile --rate 100
 
-# シェル 3: 上記コードを実行
+# シェル 3: 検証コードを実行し、終了後に Ctrl-C で停止する
 dotnet run --project <path-to-test-app>
 ```
 
@@ -265,6 +265,7 @@ using var pub = node.CreatePublisher<StringMessage>(
     "/lazy_pub", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
 await Task.Delay(500, cts.Token); // SEDP 広告の伝搬を待つ
 
+// CreateFrequencyMonitor は一時 subscriber を作成し SEDP に登録する
 using var monitor = diag.CreateFrequencyMonitor("/lazy_pub");
 
 // Publisher が存在するので WaitForMatchedAsync は true を返す
@@ -278,6 +279,15 @@ await Task.Delay(500, cts.Token);
 matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(2), cts.Token);
 Console.WriteLine($"matched after dispose: {matched}"); // false
 ```
+
+`WaitForMatchedAsync` の動作仕様:
+- timeout 経過で条件未達 → `false` を返す
+- `CancellationToken` による外部キャンセル → `OperationCanceledException`
+- `Dispose` による待機中断 → `ObjectDisposedException`
+
+レート計算は受信 timestamp 配列の直近 `WindowSize` 個から隣接 interval `(N-1)/WindowDuration` で求める。
+
+monitor が `using` スコープを抜けると Dispose され、一時 subscriber の receiver が停止し SEDP 登録が解除される。
 
 ### 判定基準
 

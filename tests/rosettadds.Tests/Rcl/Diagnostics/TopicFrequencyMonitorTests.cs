@@ -318,14 +318,16 @@ public class TopicFrequencyMonitorTests
     [Fact]
     public void TopicFrequencyOptions_WindowSize下限2未満でArgumentException()
     {
-        var act = () => new TopicFrequencyOptions(1);
+        var act = () => new TopicFrequencyOptions { WindowSize = 1 };
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
     [Fact]
     public void TopicFrequencyOptions_WindowSize上限超過でArgumentException()
     {
-        var act = () => new TopicFrequencyOptions(TopicFrequencyOptions.MaxWindowSize + 1);
+        using var context = CreateContext();
+        using var node = new Node(context, "empty_type_node");
+        var act = () => new TopicFrequencyOptions { WindowSize = TopicFrequencyOptions.MaxWindowSize + 1 };
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
@@ -338,8 +340,12 @@ public class TopicFrequencyMonitorTests
     [Fact]
     public void TopicFrequencyOptions_カスタム値()
     {
-        var opts = new TopicFrequencyOptions(
-            100, ReliabilityQos.Reliable, DurabilityQos.TransientLocal);
+        var opts = new TopicFrequencyOptions
+        {
+            WindowSize = 100,
+            Reliability = ReliabilityQos.Reliable,
+            Durability = DurabilityQos.TransientLocal,
+        };
         opts.WindowSize.Should().Be(100);
         opts.Reliability.Should().Be(ReliabilityQos.Reliable);
         opts.Durability.Should().Be(DurabilityQos.TransientLocal);
@@ -356,7 +362,7 @@ public class TopicFrequencyMonitorTests
         for (int i = 0; i < 5; i++)
             monitor.Record(clock.Advance(100_000));
 
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         stats.SampleCount.Should().Be(5);
         stats.HasData.Should().BeTrue();
     }
@@ -367,7 +373,7 @@ public class TopicFrequencyMonitorTests
         var clock = new MockClock();
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         stats.SampleCount.Should().Be(0);
         stats.HasData.Should().BeFalse();
     }
@@ -379,7 +385,7 @@ public class TopicFrequencyMonitorTests
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
         monitor.Record(clock.Advance(100_000));
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         stats.SampleCount.Should().Be(1);
         stats.HasData.Should().BeFalse();
     }
@@ -394,7 +400,7 @@ public class TopicFrequencyMonitorTests
         monitor.Record(ts);
         monitor.Record(ts); // same timestamp
 
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         stats.SampleCount.Should().Be(2);
         stats.HasData.Should().BeFalse("last timestamp is not greater than first");
     }
@@ -410,7 +416,7 @@ public class TopicFrequencyMonitorTests
         for (int i = 0; i < 4; i++)
             monitor.Record(clock.Advance(5_000_000));
 
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         stats.SampleCount.Should().Be(4);
         stats.RateHz.Should().BeApproximately(2.0, 0.001);
     }
@@ -426,8 +432,9 @@ public class TopicFrequencyMonitorTests
         for (int i = 0; i < 5; i++)
             monitor.Record(clock.Advance(2_000_000));
 
-        var stats = monitor.ComputeStatistics();
-        stats.SampleCount.Should().Be(5);
+        var stats = monitor.GetStatistics();
+        // ring buffer holds 3 entries = WindowSize
+        stats.SampleCount.Should().Be(3);
         // WindowSize=3: last 3 timestamps → 2 intervals → 400ms → 5Hz
         stats.RateHz.Should().BeApproximately(5.0, 0.001);
     }
@@ -445,7 +452,7 @@ public class TopicFrequencyMonitorTests
         monitor.Record(clock.Advance(500_000));    // +50ms  → interval 50ms
         monitor.Record(clock.Advance(3_000_000));  // +300ms → interval 300ms
 
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         stats.MinInterval.Should().Be(TimeSpan.FromMilliseconds(50));
         stats.MaxInterval.Should().Be(TimeSpan.FromMilliseconds(300));
         // mean = (200+50+300)/3 ≈ 183.33ms
@@ -464,8 +471,8 @@ public class TopicFrequencyMonitorTests
         monitor.Record(clock.Advance(1_000_000));  // +100ms
         monitor.Record(clock.Advance(1_000_000));  // +100ms
 
-        var stats = monitor.ComputeStatistics();
-        stats.StdDevInterval.TotalMilliseconds.Should().BeApproximately(0, 0.001);
+        var stats = monitor.GetStatistics();
+        stats.StandardDeviation.TotalMilliseconds.Should().BeApproximately(0, 0.001);
     }
 
     [Fact]
@@ -478,7 +485,7 @@ public class TopicFrequencyMonitorTests
         monitor.Record(clock.Advance(2_000_000));    // t1 at 300ms (+200ms)
         monitor.Record(clock.Advance(3_000_000));    // t2 at 600ms (+300ms)
 
-        var stats = monitor.ComputeStatistics();
+        var stats = monitor.GetStatistics();
         // duration = 600ms - 100ms = 500ms
         stats.Duration.Should().Be(TimeSpan.FromMilliseconds(500));
     }
@@ -606,26 +613,36 @@ public class TopicFrequencyMonitorTests
     // ======== Dispose / lifecycle ========
 
     [Fact]
-    public void Dispose後のComputeStatisticsは例外を投げない()
+    public void Dispose後のGetStatisticsはObjectDisposedException()
     {
         var clock = new MockClock();
         var monitor = CreateMonitorWithClock(clock, windowSize: 10);
         monitor.Dispose();
 
-        var act = () => monitor.ComputeStatistics();
-        act.Should().NotThrow();
+        var act = () => monitor.GetStatistics();
+        act.Should().Throw<ObjectDisposedException>();
     }
 
     [Fact]
-    public void Dispose後のRecordは無視される()
+    public void Dispose後のRecordはObjectDisposedException()
     {
         var clock = new MockClock();
         var monitor = CreateMonitorWithClock(clock, windowSize: 10);
         monitor.Dispose();
 
-        monitor.Record(clock.Advance(100_000));
-        var stats = monitor.ComputeStatistics();
-        stats.SampleCount.Should().Be(0);
+        var act = () => monitor.Record(clock.Advance(100_000));
+        act.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Dispose後のWaitForMatchedAsyncはObjectDisposedException()
+    {
+        var clock = new MockClock();
+        var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+        monitor.Dispose();
+
+        var act = () => monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(100));
+        await act.Should().ThrowAsync<ObjectDisposedException>();
     }
 
     [Fact]
@@ -635,6 +652,21 @@ public class TopicFrequencyMonitorTests
         var monitor = CreateMonitorWithClock(clock, windowSize: 10);
         monitor.Dispose();
         monitor.Dispose();
+    }
+
+    [Fact]
+    public async Task Dispose中のWaitForMatchedAsyncはキャンセルされる()
+    {
+        var clock = new MockClock();
+        var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var waitTask = monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(10));
+
+        monitor.Dispose();
+
+        var act = async () => await waitTask;
+        // dispose cancels the wait via CTS → ObjectDisposedException
+        await act.Should().ThrowAsync<ObjectDisposedException>();
     }
 
     [Fact]
@@ -657,6 +689,163 @@ public class TopicFrequencyMonitorTests
         var afterDispose = context.PublishedSubscriptionStateCount;
         afterDispose.Should().BeGreaterThan(afterCreate,
             "dispose must send SEDP unregister");
+    }
+
+    // ======== Spec Review: SampleCount / ring buffer ========
+
+    [Fact]
+    public void リングバッファ未満の記録でSampleCountは記録数と一致()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+        for (int i = 0; i < 7; i++)
+            monitor.Record(clock.Advance(100_000));
+
+        var stats = monitor.GetStatistics();
+        stats.SampleCount.Should().Be(7);
+    }
+
+    [Fact]
+    public void リングバッファ超過後にSampleCountはWindowSizeと一致()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 4);
+        // 6 records → ring buffer overwrites → holds last 4
+        for (int i = 0; i < 6; i++)
+            monitor.Record(clock.Advance(100_000));
+
+        var stats = monitor.GetStatistics();
+        stats.SampleCount.Should().Be(4);
+    }
+
+    // ======== Spec Review: stddev with non-uniform intervals ========
+
+    [Fact]
+    public void 非均一intervalで母標準偏差が正しい()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        // intervals: 100ms, 200ms, 300ms (1_000_000, 2_000_000, 3_000_000 ticks)
+        // mean = 200ms
+        // variance = ((100-200)^2 + (200-200)^2 + (300-200)^2) / 3
+        //          = (10000 + 0 + 10000) / 3 = 6666.67
+        // stddev = sqrt(6666.67) = 81.65ms
+        monitor.Record(clock.Advance(1_000_000));  // t0
+        monitor.Record(clock.Advance(2_000_000));  // +200ms
+        monitor.Record(clock.Advance(3_000_000));  // +300ms
+        monitor.Record(clock.Advance(4_000_000));  // +400ms
+
+        var stats = monitor.GetStatistics();
+        stats.StandardDeviation.TotalMilliseconds.Should().BeApproximately(81.65, 0.01);
+    }
+
+    // ======== Spec Review: WaitForMatchedAsync ========
+
+    [Fact]
+    public async Task WaitForMatchedAsync_minCount0で即true()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var result = await monitor.WaitForMatchedAsync(0, TimeSpan.FromSeconds(5));
+        result.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_負のタイムアウトでArgumentOutOfRangeException()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var act = () => monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(-2));
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_Infiniteタイムアウトは許可される()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        // Should not throw - Infinite is allowed
+        var act = () => monitor.WaitForMatchedAsync(1, System.Threading.Timeout.InfiniteTimeSpan);
+        // It'll wait forever, so we need to dispose to stop it
+        var task = act();
+        monitor.Dispose();
+        var ex = await Record.ExceptionAsync(() => task);
+        // Expected to throw ObjectDisposedException, not ArgumentOutOfRangeException
+        ex.Should().BeOfType<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_タイムアウト0で即false()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var result = await monitor.WaitForMatchedAsync(1, TimeSpan.Zero);
+        result.Should().BeFalse();
+    }
+
+    // ======== Spec Review: lifecycle ========
+
+    [Fact]
+    public void TopicDiagnostics_Disposeで全monitorがDisposeされる()
+    {
+        using var context = CreateContext();
+        context.Start();
+        using var node = new Node(context, "diag_disp");
+        using var pub = node.CreatePublisher<StringMessage>(
+            "diag_disp_topic", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+
+        var diag = node.CreateTopicDiagnostics();
+        var monitor = diag.CreateFrequencyMonitor("/diag_disp_topic");
+
+        diag.Dispose();
+
+        // monitor should be disposed → Record throws
+        var act = () => monitor.Record(0);
+        act.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public void Node_Disposeで全diagnosticsがDisposeされる()
+    {
+        using var context = CreateContext();
+        context.Start();
+        var node = new Node(context, "node_disp_diag");
+        using var pub = node.CreatePublisher<StringMessage>(
+            "node_disp_top", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+
+        var diag = node.CreateTopicDiagnostics();
+        var monitor = diag.CreateFrequencyMonitor("/node_disp_top");
+
+        node.Dispose();
+
+        // diag and monitor should be disposed
+        var act = () => monitor.Record(0);
+        act.Should().Throw<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public void Context_Disposeで全monitor連鎖Disposeされる()
+    {
+        var context = CreateContext();
+        context.Start();
+        var node = new Node(context, "ctx_disp");
+        using var pub = node.CreatePublisher<StringMessage>(
+            "ctx_disp_top", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+
+        var diag = node.CreateTopicDiagnostics();
+        var monitor = diag.CreateFrequencyMonitor("/ctx_disp_top");
+
+        // simulate: nondisposed diagnostics on node, context disposes
+        // This would call Node.Dispose → TopicDiagnostics.Dispose → monitor.Dispose
+        context.Dispose();
+
+        var act = () => monitor.Record(0);
+        act.Should().Throw<ObjectDisposedException>();
     }
 
     // ======== Test helper ========
@@ -694,7 +883,7 @@ public class TopicFrequencyMonitorTests
 
     private static TopicFrequencyMonitor CreateMonitorWithClock(MockClock clock, int windowSize)
     {
-        var opts = new TopicFrequencyOptions(windowSize);
+        var opts = new TopicFrequencyOptions { WindowSize = windowSize };
         return new TopicFrequencyMonitor(opts, clock);
     }
 

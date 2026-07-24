@@ -14,6 +14,8 @@ namespace ROSettaDDS.Rcl.Diagnostics
     {
         private readonly Node _node;
         private readonly Context _context;
+        private readonly List<TopicFrequencyMonitor> _monitors = new();
+        private readonly object _monitorsLock = new();
         private bool _disposed;
 
         internal TopicDiagnostics(Node node)
@@ -69,12 +71,31 @@ namespace ROSettaDDS.Rcl.Diagnostics
             var ddsTypeName = ddsTypeNames[0];
             var ddsTopic = topicInfo.Endpoints[0].DdsTopicName;
 
-            return new TopicFrequencyMonitor(_node, ddsTopic, ddsTypeName, options, SystemClock.Instance);
+            var monitor = new TopicFrequencyMonitor(_node, ddsTopic, ddsTypeName, options, SystemClock.Instance);
+            lock (_monitorsLock)
+            {
+                if (_disposed || _node.IsDisposed)
+                {
+                    monitor.Dispose();
+                    ThrowIfDisposed();
+                }
+                _monitors.Add(monitor);
+            }
+            return monitor;
         }
 
         public void Dispose()
         {
+            if (_disposed) return;
             _disposed = true;
+            TopicFrequencyMonitor[] snapshot;
+            lock (_monitorsLock)
+            {
+                snapshot = _monitors.ToArray();
+                _monitors.Clear();
+            }
+            foreach (var m in snapshot)
+                m.Dispose();
         }
 
         private void ThrowIfDisposed()

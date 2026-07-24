@@ -8,7 +8,7 @@ public sealed class TopicFrequencyStatistics
     public TimeSpan MinInterval { get; }
     public TimeSpan MaxInterval { get; }
     public TimeSpan MeanInterval { get; }
-    public TimeSpan StdDevInterval { get; }
+    public TimeSpan StandardDeviation { get; }
     public TimeSpan Duration { get; }
 
     internal TopicFrequencyStatistics(
@@ -18,7 +18,7 @@ public sealed class TopicFrequencyStatistics
         TimeSpan minInterval,
         TimeSpan maxInterval,
         TimeSpan meanInterval,
-        TimeSpan stdDevInterval,
+        TimeSpan standardDeviation,
         TimeSpan duration)
     {
         SampleCount = sampleCount;
@@ -27,7 +27,7 @@ public sealed class TopicFrequencyStatistics
         MinInterval = minInterval;
         MaxInterval = maxInterval;
         MeanInterval = meanInterval;
-        StdDevInterval = stdDevInterval;
+        StandardDeviation = standardDeviation;
         Duration = duration;
     }
 }

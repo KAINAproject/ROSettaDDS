@@ -29,6 +29,8 @@ public sealed class Node : IDisposable
     private int _pendingRegistrations;
     private readonly List<IDisposable> _trackedWrappers = new();
     private readonly object _wrappersLock = new();
+    private readonly List<TopicDiagnostics> _trackedDiagnostics = new();
+    private readonly object _diagnosticsLock = new();
     private readonly object _disposeGate = new();
     private readonly ManualResetEventSlim _disposeCompletedGate = new();
     private Exception? _disposeException;
@@ -333,7 +335,17 @@ public sealed class Node : IDisposable
     public TopicDiagnostics CreateTopicDiagnostics()
     {
         ThrowIfDisposed();
-        return new TopicDiagnostics(this);
+        var diag = new TopicDiagnostics(this);
+        lock (_diagnosticsLock)
+        {
+            if (_disposed != 0)
+            {
+                diag.Dispose();
+                ThrowIfDisposed();
+            }
+            _trackedDiagnostics.Add(diag);
+        }
+        return diag;
     }
 
     /// <summary>この Node の全 local endpoint metadata を値コピーで返す。</summary>
@@ -501,11 +513,13 @@ public sealed class Node : IDisposable
 
             IDisposable[] wrappers;
             lock (_wrappersLock) wrappers = _trackedWrappers.ToArray();
-            foreach (var w in wrappers)
-            {
-                w.Dispose();
-            }
+            foreach (var w in wrappers) w.Dispose();
             lock (_wrappersLock) _trackedWrappers.Clear();
+
+            TopicDiagnostics[] diagnostics;
+            lock (_diagnosticsLock) diagnostics = _trackedDiagnostics.ToArray();
+            foreach (var d in diagnostics) d.Dispose();
+            lock (_diagnosticsLock) _trackedDiagnostics.Clear();
 
             lock (_disposeGate)
             {

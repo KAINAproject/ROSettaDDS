@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using ROSettaDDS.Common;
 using ROSettaDDS.Dds;
 
@@ -12,6 +13,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
     private readonly IClock _clock;
     private readonly RawSubscription? _rawSub;
     private readonly object _lock = new();
+    private readonly CancellationTokenSource _disposeCts = new();
     private int _head;
     private int _count;
     private int _disposed;
@@ -41,34 +43,35 @@ public sealed class TopicFrequencyMonitor : IDisposable
 
     public void Record(long timestamp)
     {
-        if (Volatile.Read(ref _disposed) != 0)
-            return;
+        ThrowIfDisposed();
         lock (_lock)
         {
             _timestamps[_head] = timestamp;
             _head = (_head + 1) % _windowSize;
-            _count++;
+            if (_count < int.MaxValue)
+                _count++;
         }
     }
 
-    public TopicFrequencyStatistics ComputeStatistics()
+    public TopicFrequencyStatistics GetStatistics()
     {
+        ThrowIfDisposed();
         lock (_lock)
         {
-            int sampleCount = _count;
-            if (sampleCount == 0)
-                return NoData(sampleCount);
+            int totalCount = _count;
+            if (totalCount == 0)
+                return NoData(0);
 
-            int actualCount = Math.Min(sampleCount, _windowSize);
+            int actualCount = Math.Min(totalCount, _windowSize);
             if (actualCount < 2)
-                return NoData(sampleCount);
+                return NoData(actualCount);
 
             var ordered = CollectOrderedTimestamps(actualCount);
             long first = ordered[0];
             long last = ordered[actualCount - 1];
 
             if (last <= first)
-                return NoData(sampleCount);
+                return NoData(actualCount);
 
             var duration = _clock.GetElapsedTime(first, last);
             int intervalCount = actualCount - 1;
@@ -100,7 +103,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
             double stdDevTicks = Math.Sqrt(sumSquaredDiffs / intervalCount);
 
             return new TopicFrequencyStatistics(
-                sampleCount,
+                actualCount,
                 true,
                 rateHz,
                 TimeSpan.FromTicks(minIntervalTicks),
@@ -114,42 +117,67 @@ public sealed class TopicFrequencyMonitor : IDisposable
     public async Task<bool> WaitForMatchedAsync(int minCount, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        cts.CancelAfter(timeout);
-        try
+        if (minCount <= 0) return true;
+        if (timeout != System.Threading.Timeout.InfiniteTimeSpan && timeout < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var disposeToken = _disposeCts.Token;
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, disposeToken);
+
+        if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
+            return true;
+
+        if (timeout == TimeSpan.Zero)
+            return false;
+
+        var sw = Stopwatch.StartNew();
+        while (true)
         {
-            while (!cts.Token.IsCancellationRequested)
+            if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
+                return true;
+
+            if (timeout != System.Threading.Timeout.InfiniteTimeSpan && sw.Elapsed >= timeout)
+                return false;
+
+            try
             {
-                if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
-                    return true;
-                try
-                {
-                    await Task.Delay(10, cts.Token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                await Task.Delay(10, cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                ThrowIfDisposed();
+                throw;
             }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return false;
-        }
-        cancellationToken.ThrowIfCancellationRequested();
-        return false;
     }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
+        _disposeCts.Cancel();
+        _disposeCts.Dispose();
         _rawSub?.Dispose();
     }
 
     private void OnPayload(ReadOnlyMemory<byte> _, GuidPrefix __)
     {
-        Record(_clock.GetTimestamp());
+        if (Volatile.Read(ref _disposed) != 0)
+            return;
+        RecordCore(_clock.GetTimestamp());
+    }
+
+    private void RecordCore(long timestamp)
+    {
+        lock (_lock)
+        {
+            _timestamps[_head] = timestamp;
+            _head = (_head + 1) % _windowSize;
+            if (_count < int.MaxValue)
+                _count++;
+        }
     }
 
     private void ThrowIfDisposed()

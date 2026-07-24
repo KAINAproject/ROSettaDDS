@@ -15,7 +15,7 @@ internal sealed class SystemClock : IClock
     public TimeSpan GetElapsedTime(long startingTimestamp, long endingTimestamp)
     {
         var freq = System.Diagnostics.Stopwatch.Frequency;
-        var ticks = (endingTimestamp - startingTimestamp) * TimeSpan.TicksPerSecond / freq;
-        return TimeSpan.FromTicks(ticks);
+        double seconds = (double)(endingTimestamp - startingTimestamp) / freq;
+        return TimeSpan.FromSeconds(seconds);
     }
 }

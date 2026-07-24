@@ -166,8 +166,8 @@ dotnet run --project tools/rosettadds-genmsg -- --input msgs --output src/rosett
 Subscriber のローカルオブジェクト作成自体は `Start()` 前でも可能ですが、外部からの
 データ受信や publisher とのマッチには `Start()` が必要です。
 `GetTopics` / `GetTopicInfo` はローカル snapshot を返すため `Start()` 前でも呼べます。
-`CreateFrequencyMonitor` は内部で subscriber を作成して受信・マッチを行うため
-`Start()` が必要です。
+`CreateFrequencyMonitor` の作成自体は `Start()` 前でも可能です。ただし外部 topic の
+発見・マッチ・受信には `Start()` が必要です。
 
 ```csharp
 using ROSettaDDS.Rcl;

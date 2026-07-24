@@ -163,8 +163,11 @@ dotnet run --project tools/rosettadds-genmsg -- --input msgs --output src/rosett
 `TopicDiagnostics` を使うと、Discovery から収集した Topic 一覧 (`GetTopics`)、
 特定 Topic の詳細 (`GetTopicInfo`)、およびメッセージ到達レートの監視 (`CreateFrequencyMonitor`)
 が行えます。`Context.Start()` は外部 discovery および DDS 通信を開始するために必要です。
-`GetTopics` / `GetTopicInfo` はローカル snapshot を返すため `Start()` 前でも呼べますが、
-`CreateFrequencyMonitor` が内部で subscriber を作成するには `Start()` が必要です。
+Subscriber のローカルオブジェクト作成自体は `Start()` 前でも可能ですが、外部からの
+データ受信や publisher とのマッチには `Start()` が必要です。
+`GetTopics` / `GetTopicInfo` はローカル snapshot を返すため `Start()` 前でも呼べます。
+`CreateFrequencyMonitor` は内部で subscriber を作成して受信・マッチを行うため
+`Start()` が必要です。
 
 ```csharp
 using ROSettaDDS.Rcl;

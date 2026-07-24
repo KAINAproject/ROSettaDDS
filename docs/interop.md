@@ -155,6 +155,111 @@ dotnet run --project tools/rosettadds-perf-runner -- \
 Player log、helper stdout/stderr log。いずれかの scenario が失敗した場合 runner は
 非 0 で終了するが、成功/失敗の内訳と生成済み artifact は `manifest.json` に残る。
 
+## FrequencyMonitor の相互運用確認
+
+ROS 2 (Fast DDS) publisher に対して rosettadds の `TopicFrequencyMonitor` で
+メッセージレートを計測できることを確認する。検証は ROS 2 CLI (`ros2 topic pub`) が
+使える環境で実行し、初回 publish 前に discovery を待つため最初の数秒の欠損は許容する。
+
+### 検証用コード
+
+以下のコード片をコンソールアプリケーションとして実行する。
+(ROSettaDDS への参照が必要。詳細は README.ja.md の「クイックスタート」を参照。)
+
+```csharp
+using ROSettaDDS.Dds.QoS;
+using ROSettaDDS.Rcl;
+using ROSettaDDS.Rcl.Diagnostics;
+
+var options = new ContextOptions
+{
+    DomainId = 0,
+    EntityName = "fm_interop",
+    LocalhostOnly = true,
+};
+using var context = new Context(options);
+using var node = new Node(context, "fm_interop");
+context.Start();
+
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+
+using var diag = node.CreateTopicDiagnostics();
+
+// 事前に discovery を待つ (ROS 2 publisher が起動済みであること)
+await Task.Delay(3000);
+
+// ===== BestEffort sensor-data (10 Hz) =====
+using var beMonitor = diag.CreateFrequencyMonitor("/sensor_data");
+if (!await beMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5)))
+{
+    Console.Error.WriteLine("BE: no matched publisher");
+    return 1;
+}
+await Task.Delay(3000);
+var beStats = beMonitor.GetStatistics();
+Console.WriteLine($"BE: rate={beStats.RateHz:F1} Hz samples={beStats.SampleCount}");
+bool beOk = beStats.HasData && beStats.RateHz is >= 8 and <= 12;
+
+// ===== Reliable (100 Hz) =====
+using var relMonitor = diag.CreateFrequencyMonitor(
+    "/reliable_data",
+    new TopicFrequencyOptions { Reliability = ReliabilityQos.Reliable });
+if (!await relMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5)))
+{
+    Console.Error.WriteLine("Rel: no matched publisher");
+    return 1;
+}
+await Task.Delay(5000);
+var relStats = relMonitor.GetStatistics();
+Console.WriteLine($"Rel: rate={relStats.RateHz:F1} Hz samples={relStats.SampleCount}");
+bool relOk = relStats.HasData && relStats.RateHz is >= 90 and <= 110;
+
+Console.WriteLine($"BE: {(beOk ? "PASS" : "FAIL")}  Rel: {(relOk ? "PASS" : "FAIL")}");
+return beOk && relOk ? 0 : 1;
+```
+
+### 検証手順
+
+```sh
+# シェル 1: BestEffort sensor-data 10 Hz
+ros2 topic pub /sensor_data std_msgs/msg/String "data: 's-{01}'" \
+  --qos-reliability best_effort --qos-durability volatile --rate 10 --max-messages 100
+
+# シェル 2: Reliable 100 Hz
+ros2 topic pub /reliable_data std_msgs/msg/String "data: 'f-{01}'" \
+  --qos-reliability reliable --qos-durability volatile --rate 100 --max-messages 1000
+
+# シェル 3: 上記コードを実行
+dotnet run --project <path-to-test-app>
+```
+
+### Matched 判定の検証
+
+`WaitForMatchedAsync` で publisher の接続を検出できることを確認する。
+
+```csharp
+using var diag = node.CreateTopicDiagnostics();
+
+// publisher がまだ存在しない状態で呼ぶ
+using var monitor = diag.CreateFrequencyMonitor("/lazy_pub");
+
+// false (timeout)
+bool matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(2));
+Console.WriteLine($"matched before pub: {matched}"); // false
+
+// 別シェルで ros2 topic pub /lazy_pub ... を起動後、再接続確認
+matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5));
+Console.WriteLine($"matched after pub: {matched}"); // true
+```
+
+### 判定基準
+
+- BestEffort / Reliable ともに `GetStatistics().HasData == true` かつ `RateHz > 0` を満たすこと
+- レート値は ±20% の許容範囲内であること
+- `WaitForMatchedAsync` は publisher 生存中に `true` を返すこと (不在時は `false` または timeout)
+- 同一 topic に一時 subscriber が追加されることを許容すること
+
 ## 次に追加する検証
 
 - Best Effort publisher/subscriber の組み合わせ

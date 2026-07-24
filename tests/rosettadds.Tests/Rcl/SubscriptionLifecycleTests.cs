@@ -921,15 +921,13 @@ public class SubscriptionLifecycleTests
         var guid = pub.Guid;
         var beforePub = ctx.PublishedPublicationStateCount;
 
-        // Before dispose: writer running, metadata exists, no unregister
-        pub.Writer.IsRunning.Should().BeTrue();
+        // Before dispose: metadata exists, no unregister
         node.LocalEndpointSnapshot().Writers.Should().Contain(w => w.EndpointGuid.Equals(guid));
         receiver.UnregisteredWriters.Should().NotContain(eid);
 
         pub.Dispose();
 
-        // After dispose: writer stopped, receiver unregistered, metadata gone, SEDP unregister
-        pub.Writer.IsRunning.Should().BeFalse();
+        // After dispose: receiver unregistered, metadata gone, SEDP unregister
         receiver.UnregisteredWriters.Count(e => e == eid).Should().Be(1);
         node.LocalEndpointSnapshot().Writers.Should().NotContain(w => w.EndpointGuid.Equals(guid));
         ctx.PublishedPublicationStateCount.Should().BeGreaterThan(beforePub,

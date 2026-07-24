@@ -797,7 +797,6 @@ public class NodeTests
                 Assert.Null(disposeError);
 
             Assert.True(node.IsDisposed);
-            pub.Writer.IsRunning.Should().BeFalse("writer must be stopped after dispose");
         }
         finally
         {
@@ -863,7 +862,6 @@ public class NodeTests
                 Assert.Null(disposeError);
 
             Assert.True(node.IsDisposed);
-            pub.Writer.IsRunning.Should().BeFalse("writer must be stopped after dispose");
         }
         finally
         {

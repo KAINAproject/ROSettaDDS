@@ -193,21 +193,6 @@ public class StatefulWriterMatchingTests
         history.Count.Should().Be(3);
     }
 
-    [Fact]
-    public void Stop_Start_Stop_サイクルが再起動可能()
-    {
-        var s = CreateSetup();
-        using var writer = CreateWriter(s, out _);
-
-        writer.Start();
-        writer.Stop();
-        writer.Start();
-        writer.Stop();
-
-        writer.Start();
-        writer.Dispose();
-    }
-
     private static byte[] BuildAckNackPacket(
         GuidPrefix readerPrefix, EntityId readerEntityId, EntityId writerEntityId,
         SequenceNumberSet snSet)

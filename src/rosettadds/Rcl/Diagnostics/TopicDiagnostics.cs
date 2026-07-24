@@ -43,6 +43,35 @@ namespace ROSettaDDS.Rcl.Diagnostics
             return null;
         }
 
+        public TopicFrequencyMonitor CreateFrequencyMonitor(
+            string topicName,
+            TopicFrequencyOptions? options = null)
+        {
+            ThrowIfDisposed();
+            if (string.IsNullOrEmpty(topicName))
+                throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
+
+            options ??= TopicFrequencyOptions.Default;
+
+            var topicInfo = GetTopicInfo(topicName);
+            if (topicInfo is null)
+                throw new TopicNotFoundException(topicName);
+
+            var ddsTypeNames = topicInfo.Endpoints
+                .Select(e => e.DdsTypeName)
+                .Where(n => !string.IsNullOrEmpty(n))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+
+            if (ddsTypeNames.Length != 1)
+                throw new AmbiguousTopicTypeException(topicName);
+
+            var ddsTypeName = ddsTypeNames[0];
+            var ddsTopic = topicInfo.Endpoints[0].DdsTopicName;
+
+            return new TopicFrequencyMonitor(_node, ddsTopic, ddsTypeName, options, SystemClock.Instance);
+        }
+
         public void Dispose()
         {
             _disposed = true;
@@ -77,6 +106,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
                     ep.Kind,
                     isLocal,
                     displayTopicName,
+                    ep.TopicName,
                     ep.TypeName,
                     rosTypeName,
                     ep.Reliability,

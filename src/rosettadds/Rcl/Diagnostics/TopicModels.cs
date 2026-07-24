@@ -14,6 +14,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
         public EndpointKind Kind { get; }
         public bool IsLocal { get; }
         public string TopicName { get; }
+        public string DdsTopicName { get; }
         public string DdsTypeName { get; }
         public string? RosTypeName { get; }
         public ReliabilityQos Reliability { get; }
@@ -24,6 +25,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
             EndpointKind kind,
             bool isLocal,
             string topicName,
+            string ddsTopicName,
             string ddsTypeName,
             string? rosTypeName,
             ReliabilityQos reliability,
@@ -33,6 +35,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
             Kind = kind;
             IsLocal = isLocal;
             TopicName = topicName;
+            DdsTopicName = ddsTopicName;
             DdsTypeName = ddsTypeName;
             RosTypeName = rosTypeName;
             Reliability = reliability;

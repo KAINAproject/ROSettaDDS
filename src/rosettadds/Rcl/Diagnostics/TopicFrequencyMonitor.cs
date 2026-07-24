@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using ROSettaDDS.Common;
 using ROSettaDDS.Dds;
 
@@ -41,7 +40,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
 
     public int MatchedWriterCount => _rawSub?.MatchedWriterCount ?? 0;
 
-    public void Record(long timestamp)
+    internal void Record(long timestamp)
     {
         ThrowIfDisposed();
         lock (_lock)
@@ -73,9 +72,11 @@ public sealed class TopicFrequencyMonitor : IDisposable
             if (last <= first)
                 return NoData(actualCount);
 
-            var duration = _clock.GetElapsedTime(first, last);
+            var windowDuration = _clock.GetElapsedTime(first, last);
+            if (windowDuration <= TimeSpan.Zero)
+                return NoData(actualCount);
             int intervalCount = actualCount - 1;
-            double rateHz = intervalCount / duration.TotalSeconds;
+            double rateHz = intervalCount / windowDuration.TotalSeconds;
 
             long minIntervalTicks = long.MaxValue;
             long maxIntervalTicks = long.MinValue;
@@ -110,7 +111,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
                 TimeSpan.FromTicks(maxIntervalTicks),
                 TimeSpan.FromTicks((long)meanTicks),
                 TimeSpan.FromTicks((long)stdDevTicks),
-                duration);
+                windowDuration);
         }
     }
 
@@ -132,13 +133,19 @@ public sealed class TopicFrequencyMonitor : IDisposable
         if (timeout == TimeSpan.Zero)
             return false;
 
-        var sw = Stopwatch.StartNew();
+        var deadline = timeout != System.Threading.Timeout.InfiniteTimeSpan
+            ? DateTime.UtcNow + timeout
+            : DateTime.MaxValue;
         while (true)
         {
             if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
+            {
+                if (timeout != System.Threading.Timeout.InfiniteTimeSpan && DateTime.UtcNow >= deadline)
+                    return false;
                 return true;
+            }
 
-            if (timeout != System.Threading.Timeout.InfiniteTimeSpan && sw.Elapsed >= timeout)
+            if (timeout != System.Threading.Timeout.InfiniteTimeSpan && DateTime.UtcNow >= deadline)
                 return false;
 
             try

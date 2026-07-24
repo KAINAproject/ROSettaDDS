@@ -336,6 +336,7 @@ public sealed class Node : IDisposable
     {
         ThrowIfDisposed();
         var diag = new TopicDiagnostics(this);
+        diag.TestEventRecorder = TestEventRecorder;
         lock (_diagnosticsLock)
         {
             if (_disposed != 0)
@@ -511,20 +512,26 @@ public sealed class Node : IDisposable
                 sw.SpinOnce();
             }
 
-            IDisposable[] wrappers;
-            lock (_wrappersLock) wrappers = _trackedWrappers.ToArray();
-            foreach (var w in wrappers) w.Dispose();
-            lock (_wrappersLock) _trackedWrappers.Clear();
-
+            TestEventRecorder?.Invoke("NodeDisposeDiagnosticsStart");
             TopicDiagnostics[] diagnostics;
             lock (_diagnosticsLock) diagnostics = _trackedDiagnostics.ToArray();
             foreach (var d in diagnostics) d.Dispose();
             lock (_diagnosticsLock) _trackedDiagnostics.Clear();
+            TestEventRecorder?.Invoke("NodeDisposeDiagnosticsEnd");
 
+            TestEventRecorder?.Invoke("NodeDisposeWrappersStart");
+            IDisposable[] wrappers;
+            lock (_wrappersLock) wrappers = _trackedWrappers.ToArray();
+            foreach (var w in wrappers) w.Dispose();
+            lock (_wrappersLock) _trackedWrappers.Clear();
+            TestEventRecorder?.Invoke("NodeDisposeWrappersEnd");
+
+            TestEventRecorder?.Invoke("NodeDisposeEndpointsStart");
             lock (_disposeGate)
             {
                 UnregisterAllLocalEndpoints();
             }
+            TestEventRecorder?.Invoke("NodeDisposeEndpointsEnd");
 
             if (_discovery is not null)
             {

@@ -1,6 +1,6 @@
 namespace ROSettaDDS.Rcl.Diagnostics;
 
-public interface IClock
+internal interface IClock
 {
     long GetTimestamp();
     TimeSpan GetElapsedTime(long startingTimestamp, long endingTimestamp);
@@ -14,8 +14,12 @@ internal sealed class SystemClock : IClock
 
     public TimeSpan GetElapsedTime(long startingTimestamp, long endingTimestamp)
     {
-        var freq = System.Diagnostics.Stopwatch.Frequency;
-        double seconds = (double)(endingTimestamp - startingTimestamp) / freq;
+        if (endingTimestamp < startingTimestamp)
+            return TimeSpan.Zero;
+        double delta = (double)endingTimestamp - (double)startingTimestamp;
+        double seconds = delta / System.Diagnostics.Stopwatch.Frequency;
+        if (seconds <= 0)
+            return TimeSpan.Zero;
         return TimeSpan.FromSeconds(seconds);
     }
 }

@@ -18,7 +18,10 @@ namespace ROSettaDDS.Rcl.Diagnostics
         private readonly object _monitorsLock = new();
         private bool _disposed;
 
-        internal TopicDiagnostics(Node node)
+        /// <summary>Test seam: records lifecycle events for verification.</summary>
+    internal Action<string>? TestEventRecorder { get; set; }
+
+    internal TopicDiagnostics(Node node)
         {
             _node = node ?? throw new ArgumentNullException(nameof(node));
             _context = node.Context;
@@ -88,6 +91,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
         {
             if (_disposed) return;
             _disposed = true;
+            TestEventRecorder?.Invoke("TopicDiagnosticsDisposeStart");
             TopicFrequencyMonitor[] snapshot;
             lock (_monitorsLock)
             {
@@ -96,6 +100,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
             }
             foreach (var m in snapshot)
                 m.Dispose();
+            TestEventRecorder?.Invoke("TopicDiagnosticsDisposeEnd");
         }
 
         private void ThrowIfDisposed()

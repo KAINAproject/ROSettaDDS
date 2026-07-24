@@ -9,7 +9,7 @@ public sealed class TopicFrequencyStatistics
     public TimeSpan MaxInterval { get; }
     public TimeSpan MeanInterval { get; }
     public TimeSpan StandardDeviation { get; }
-    public TimeSpan Duration { get; }
+    public TimeSpan WindowDuration { get; }
 
     internal TopicFrequencyStatistics(
         int sampleCount,
@@ -19,7 +19,7 @@ public sealed class TopicFrequencyStatistics
         TimeSpan maxInterval,
         TimeSpan meanInterval,
         TimeSpan standardDeviation,
-        TimeSpan duration)
+        TimeSpan windowDuration)
     {
         SampleCount = sampleCount;
         HasData = hasData;
@@ -28,6 +28,6 @@ public sealed class TopicFrequencyStatistics
         MaxInterval = maxInterval;
         MeanInterval = meanInterval;
         StandardDeviation = standardDeviation;
-        Duration = duration;
+        WindowDuration = windowDuration;
     }
 }

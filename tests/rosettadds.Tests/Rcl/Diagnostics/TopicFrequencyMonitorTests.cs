@@ -487,7 +487,7 @@ public class TopicFrequencyMonitorTests
 
         var stats = monitor.GetStatistics();
         // duration = 600ms - 100ms = 500ms
-        stats.Duration.Should().Be(TimeSpan.FromMilliseconds(500));
+        stats.WindowDuration.Should().Be(TimeSpan.FromMilliseconds(500));
     }
 
     // ======== CreateFrequencyMonitor ========
@@ -848,6 +848,262 @@ public class TopicFrequencyMonitorTests
         act.Should().Throw<ObjectDisposedException>();
     }
 
+    // ======== Spec Review: Public API signature reflection ========
+
+    [Fact]
+    public void TopicFrequencyStatistics_公開プロパティシグネチャ()
+    {
+        var props = typeof(TopicFrequencyStatistics)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Select(p => p.Name)
+            .OrderBy(n => n)
+            .ToArray();
+        props.Should().BeEquivalentTo(new[]
+        {
+            "HasData",
+            "MaxInterval",
+            "MeanInterval",
+            "MinInterval",
+            "RateHz",
+            "SampleCount",
+            "StandardDeviation",
+            "WindowDuration",
+        });
+    }
+
+    [Fact]
+    public void TopicFrequencyStatistics_コンストラクタはinternal()
+    {
+        var ctors = typeof(TopicFrequencyStatistics).GetConstructors(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        ctors.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TopicFrequencyMonitor_公開メソッドシグネチャ()
+    {
+        var methods = typeof(TopicFrequencyMonitor)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
+            .Select(m => m.Name)
+            .Distinct()
+            .OrderBy(n => n)
+            .ToArray();
+        methods.Should().BeEquivalentTo(new[]
+        {
+            "Dispose",
+            "GetStatistics",
+            "WaitForMatchedAsync",
+        });
+    }
+
+    [Fact]
+    public void TopicFrequencyMonitor_Recordはinternal()
+    {
+        var method = typeof(TopicFrequencyMonitor).GetMethod("Record",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        method.Should().BeNull("Record must not be public");
+    }
+
+    [Fact]
+    public void IClockはinternal()
+    {
+        var isPublic = typeof(IClock).IsVisible;
+        isPublic.Should().BeFalse("IClock must be internal");
+    }
+
+    [Fact]
+    public void TopicFrequencyOptions_公開プロパティシグネチャ()
+    {
+        var props = typeof(TopicFrequencyOptions)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Select(p => p.Name)
+            .OrderBy(n => n)
+            .ToArray();
+        props.Should().BeEquivalentTo(new[] { "Durability", "Reliability", "WindowSize" });
+    }
+
+    [Fact]
+    public void TopicDiagnostics_公開メソッドシグネチャ()
+    {
+        var methods = typeof(TopicDiagnostics)
+            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
+            .Select(m => m.Name)
+            .Distinct()
+            .OrderBy(n => n)
+            .ToArray();
+        methods.Should().BeEquivalentTo(new[]
+        {
+            "CreateFrequencyMonitor",
+            "Dispose",
+            "GetTopicInfo",
+            "GetTopics",
+        });
+    }
+
+    [Fact]
+    public void TopicInfo_公開プロパティシグネチャ()
+    {
+        var props = typeof(TopicInfo)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Select(p => p.Name)
+            .OrderBy(n => n)
+            .ToArray();
+        props.Should().BeEquivalentTo(new[]
+        {
+            "Endpoints", "PublisherCount", "RosTypeNames", "SubscriberCount", "TopicName",
+        });
+    }
+
+    [Fact]
+    public void TopicEndpointInfo_公開プロパティシグネチャ()
+    {
+        var props = typeof(TopicEndpointInfo)
+            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+            .Select(p => p.Name)
+            .OrderBy(n => n)
+            .ToArray();
+        props.Should().BeEquivalentTo(new[]
+        {
+            "DdsTopicName", "DdsTypeName", "Durability", "EndpointGuid",
+            "IsLocal", "Kind", "Reliability", "RosTypeName", "TopicName",
+        });
+    }
+
+    // ======== Spec Review: 実 clock 近似テスト ========
+
+    [Fact]
+    public void SystemClock_実経過時間が概ね一致する()
+    {
+        var clock = SystemClock.Instance;
+        long t0 = clock.GetTimestamp();
+        Thread.SpinWait(50_000);
+        long t1 = clock.GetTimestamp();
+        var elapsed = clock.GetElapsedTime(t0, t1);
+        elapsed.Should().BeGreaterThan(TimeSpan.Zero);
+        elapsed.TotalMilliseconds.Should().BeLessThan(100);
+    }
+
+    [Fact]
+    public void SystemClock_同timestampでTimeSpanZero()
+    {
+        var clock = SystemClock.Instance;
+        long ts = clock.GetTimestamp();
+        var elapsed = clock.GetElapsedTime(ts, ts);
+        elapsed.Should().Be(TimeSpan.Zero);
+    }
+
+    // ======== Spec Review: WaitForMatchedAsync deadline境界 ========
+
+    [Fact]
+    public async Task WaitForMatchedAsync_readerのみ存在でtimeoutがfalse()
+    {
+        using var context = CreateContext();
+        context.Start();
+        using var node = new Node(context, "reader_only_node");
+        using var diag = node.CreateTopicDiagnostics();
+
+        // Add a reader (not writer) so topic exists but no writer match
+        var prefix = Prefix(55);
+        context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
+        context.DiscoveryDb.UpsertEndpoint(
+            Endpoint(prefix, EndpointKind.Reader, 0x10, "rt/reader_only_topic"), DateTime.UtcNow);
+
+        using var monitor = diag.CreateFrequencyMonitor("/reader_only_topic");
+
+        var result = await monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(1));
+        result.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_外部キャンセルでOperationCanceledException()
+    {
+        using var context = CreateContext();
+        using var node = new Node(context, "ext_cancel_node");
+        using var diag = node.CreateTopicDiagnostics();
+
+        var prefix = Prefix(51);
+        context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
+        context.DiscoveryDb.UpsertEndpoint(
+            Endpoint(prefix, EndpointKind.Writer, 0x10, "rt/ext_cancel_topic"), DateTime.UtcNow);
+        using var monitor = diag.CreateFrequencyMonitor("/ext_cancel_topic");
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        var act = () => monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token);
+        await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    // ======== Spec Review: Node.Dispose 順序 ========
+
+    [Fact]
+    public void Node_Disposeは診断_wrapper_endpointの順で処理する()
+    {
+        using var context = CreateContext();
+        context.Start();
+        var node = new Node(context, "dispose_order_test");
+
+        var recordedEvents = new List<string>();
+        node.TestEventRecorder = msg => recordedEvents.Add(msg);
+
+        using var pub = node.CreatePublisher<StringMessage>(
+            "order_topic", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var diag = node.CreateTopicDiagnostics();
+        using var monitor = diag.CreateFrequencyMonitor("/order_topic");
+
+        node.Dispose();
+
+        var idxDiagStart = recordedEvents.IndexOf("NodeDisposeDiagnosticsStart");
+        var idxDiagEnd = recordedEvents.IndexOf("TopicDiagnosticsDisposeStart");
+        var idxTopicDiagEnd = recordedEvents.IndexOf("TopicDiagnosticsDisposeEnd");
+        var idxDiagSectionEnd = recordedEvents.IndexOf("NodeDisposeDiagnosticsEnd");
+        var idxWrappersStart = recordedEvents.IndexOf("NodeDisposeWrappersStart");
+        var idxWrappersEnd = recordedEvents.IndexOf("NodeDisposeWrappersEnd");
+        var idxEndpointsStart = recordedEvents.IndexOf("NodeDisposeEndpointsStart");
+        var idxEndpointsEnd = recordedEvents.IndexOf("NodeDisposeEndpointsEnd");
+
+        idxDiagStart.Should().BeGreaterOrEqualTo(0, "must have diagnostics start");
+        idxDiagEnd.Should().BeGreaterOrEqualTo(0, "must have TopicDiagnosticsDisposeStart");
+        idxTopicDiagEnd.Should().BeGreaterOrEqualTo(0, "must have TopicDiagnosticsDisposeEnd");
+        idxDiagSectionEnd.Should().BeGreaterOrEqualTo(0, "must have diagnostics end");
+        idxWrappersStart.Should().BeGreaterOrEqualTo(0, "must have wrappers start");
+        idxWrappersEnd.Should().BeGreaterOrEqualTo(0, "must have wrappers end");
+        idxEndpointsStart.Should().BeGreaterOrEqualTo(0, "must have endpoints start");
+        idxEndpointsEnd.Should().BeGreaterOrEqualTo(0, "must have endpoints end");
+
+        // Verify order: diagnostics → wrappers → endpoints
+        idxDiagSectionEnd.Should().BeLessThan(idxWrappersStart,
+            "diagnostics dispose must complete before wrappers dispose");
+        idxWrappersEnd.Should().BeLessThan(idxEndpointsStart,
+            "wrappers dispose must complete before endpoints unregister");
+    }
+
+    [Fact]
+    public void Node_Disposeでdiag先にDisposeされmonitorのwaiterがキャンセルされる()
+    {
+        using var context = CreateContext();
+        context.Start();
+        var node = new Node(context, "diag_first_test");
+
+        using var diag = node.CreateTopicDiagnostics();
+
+        var prefix = Prefix(60);
+        context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
+        context.DiscoveryDb.UpsertEndpoint(
+            Endpoint(prefix, EndpointKind.Writer, 0x10, "rt/diag_first"), DateTime.UtcNow);
+        using var monitor = diag.CreateFrequencyMonitor("/diag_first");
+
+        // Start waiting (will not be satisfied)
+        var waitTask = monitor.WaitForMatchedAsync(2, TimeSpan.FromSeconds(10));
+
+        node.Dispose();
+
+        var act = async () => await waitTask;
+        act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
     // ======== Test helper ========
 
     private static GuidPrefix Prefix(byte id)
@@ -900,8 +1156,13 @@ public class TopicFrequencyMonitorTests
 
         public TimeSpan GetElapsedTime(long startingTimestamp, long endingTimestamp)
         {
-            // Simulate Stopwatch ticks: 1 tick = 100ns for this mock
-            return TimeSpan.FromTicks(endingTimestamp - startingTimestamp);
+            if (endingTimestamp < startingTimestamp)
+                return TimeSpan.Zero;
+            double delta = (double)endingTimestamp - (double)startingTimestamp;
+            double ticks = delta;
+            if (ticks <= 0)
+                return TimeSpan.Zero;
+            return TimeSpan.FromTicks((long)ticks);
         }
 
         /// <summary>Advance clock by given ticks and return new timestamp.</summary>

@@ -135,23 +135,13 @@ public sealed class TopicFrequencyMonitor : IDisposable
 
         var hasTimeout = timeout != System.Threading.Timeout.InfiniteTimeSpan && timeout != TimeSpan.MaxValue;
         long startTimestamp = 0;
-        decimal timeoutSeconds = 0;
         if (hasTimeout)
-        {
-            startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
-            timeoutSeconds = (decimal)timeout.TotalSeconds;
-        }
+            startTimestamp = _clock.GetTimestamp();
 
         while (true)
         {
-            if (hasTimeout)
-            {
-                long now = System.Diagnostics.Stopwatch.GetTimestamp();
-                decimal delta = (decimal)now - (decimal)startTimestamp;
-                decimal elapsedSeconds = delta / System.Diagnostics.Stopwatch.Frequency;
-                if (elapsedSeconds >= timeoutSeconds)
-                    return false;
-            }
+            if (hasTimeout && _clock.GetElapsedTime(startTimestamp, _clock.GetTimestamp()) >= timeout)
+                return false;
 
             if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
                 return true;

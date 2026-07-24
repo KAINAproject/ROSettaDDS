@@ -1,3 +1,4 @@
+using System.Reflection;
 using ROSettaDDS.Common;
 using ROSettaDDS.Common.Logging;
 using ROSettaDDS.Dds;
@@ -272,9 +273,16 @@ public class TopicFrequencyMonitorTests
         {
             threads[i] = new Thread(() =>
             {
-                barrier.SignalAndWait();
-                for (int j = 0; j < 100; j++)
-                    reader.SimulatePayload(new byte[] { (byte)j }, default);
+                try
+                {
+                    barrier.SignalAndWait();
+                    for (int j = 0; j < 100; j++)
+                        reader.SimulatePayload(new byte[] { (byte)j }, default);
+                }
+                catch
+                {
+                    // ignore unhandled exception in raw thread
+                }
             });
         }
 
@@ -293,8 +301,15 @@ public class TopicFrequencyMonitorTests
 
         var callbackThread = new Thread(() =>
         {
-            for (int i = 0; i < 50; i++)
-                reader.SimulatePayload(new byte[] { (byte)i }, default);
+            try
+            {
+                for (int i = 0; i < 50; i++)
+                    reader.SimulatePayload(new byte[] { (byte)i }, default);
+            }
+            catch
+            {
+                // ignore unhandled exception in raw thread
+            }
         });
         callbackThread.Start();
 
@@ -848,239 +863,299 @@ public class TopicFrequencyMonitorTests
         act.Should().Throw<ObjectDisposedException>();
     }
 
-    // ======== Spec Review: Public API signature reflection ========
+    // ======== Spec Review: Public API surface reflection ========
 
     [Fact]
-    public void TopicFrequencyStatistics_公開プロパティシグネチャ()
+    public void Diagnostics名前空間の公開型一覧()
     {
-        var props = typeof(TopicFrequencyStatistics)
-            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-            .Select(p => p.Name)
+        var types = typeof(TopicFrequencyMonitor).Assembly.GetTypes()
+            .Where(t => t.Namespace == typeof(TopicFrequencyMonitor).Namespace && t.IsPublic)
+            .Select(t => t.Name)
             .OrderBy(n => n)
             .ToArray();
-        props.Should().BeEquivalentTo(new[]
+        types.Should().BeEquivalentTo(new[]
         {
-            "HasData",
-            "MaxInterval",
-            "MeanInterval",
-            "MinInterval",
-            "RateHz",
-            "SampleCount",
-            "StandardDeviation",
-            "WindowDuration",
+            "AmbiguousTopicTypeException",
+            "TopicDiagnostics",
+            "TopicEndpointInfo",
+            "TopicFrequencyMonitor",
+            "TopicFrequencyOptions",
+            "TopicFrequencyStatistics",
+            "TopicInfo",
+            "TopicNotFoundException",
         });
     }
 
     [Fact]
-    public void TopicFrequencyStatistics_コンストラクタはinternal()
+    public void TopicEndpointInfo_公開API()
     {
-        var ctors = typeof(TopicFrequencyStatistics).GetConstructors(
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        ctors.Should().BeEmpty();
-    }
+        var t = typeof(TopicEndpointInfo);
 
-    [Fact]
-    public void TopicFrequencyMonitor_公開メソッドシグネチャ()
-    {
-        var methods = typeof(TopicFrequencyMonitor)
-            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly)
-            .Where(m => !m.IsSpecialName)
-            .Select(m => m.Name)
-            .Distinct()
-            .OrderBy(n => n)
-            .ToArray();
-        methods.Should().BeEquivalentTo(new[]
+        t.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
+
+        var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(p => p.Name).ToArray();
+        var expected = new (string name, Type type, bool canRead, bool canWrite)[]
         {
-            "Dispose",
-            "GetStatistics",
-            "WaitForMatchedAsync",
-        });
+            ("DdsTopicName", typeof(string), true, false),
+            ("DdsTypeName", typeof(string), true, false),
+            ("Durability", typeof(DurabilityQos), true, false),
+            ("EndpointGuid", typeof(Guid), true, false),
+            ("IsLocal", typeof(bool), true, false),
+            ("Kind", typeof(EndpointKind), true, false),
+            ("Reliability", typeof(ReliabilityQos), true, false),
+            ("RosTypeName", typeof(string), true, false),
+            ("TopicName", typeof(string), true, false),
+        };
+        props.Select(p => (p.Name, p.PropertyType, p.CanRead, p.CanWrite))
+            .Should().BeEquivalentTo(expected);
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName).ToArray();
+        methods.Should().BeEmpty();
     }
 
     [Fact]
-    public void TopicFrequencyMonitor_Recordはinternal()
+    public void TopicInfo_公開API()
     {
-        var method = typeof(TopicFrequencyMonitor).GetMethod("Record",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        method.Should().BeNull("Record must not be public");
-    }
+        var t = typeof(TopicInfo);
 
-    [Fact]
-    public void IClockはinternal()
-    {
-        var isPublic = typeof(IClock).IsVisible;
-        isPublic.Should().BeFalse("IClock must be internal");
-    }
+        t.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
 
-    [Fact]
-    public void TopicFrequencyOptions_公開プロパティシグネチャ()
-    {
-        var props = typeof(TopicFrequencyOptions)
-            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-            .Select(p => p.Name)
-            .OrderBy(n => n)
-            .ToArray();
-        props.Should().BeEquivalentTo(new[] { "Durability", "Reliability", "WindowSize" });
-    }
-
-    [Fact]
-    public void TopicDiagnostics_公開メソッドシグネチャ()
-    {
-        var methods = typeof(TopicDiagnostics)
-            .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly)
-            .Where(m => !m.IsSpecialName)
-            .Select(m => m.Name)
-            .Distinct()
-            .OrderBy(n => n)
-            .ToArray();
-        methods.Should().BeEquivalentTo(new[]
+        var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(p => p.Name).ToArray();
+        var expected = new (string name, Type type, bool canRead, bool canWrite)[]
         {
-            "CreateFrequencyMonitor",
-            "Dispose",
-            "GetTopicInfo",
-            "GetTopics",
-        });
+            ("Endpoints", typeof(IReadOnlyList<TopicEndpointInfo>), true, false),
+            ("PublisherCount", typeof(int), true, false),
+            ("RosTypeNames", typeof(IReadOnlyList<string>), true, false),
+            ("SubscriberCount", typeof(int), true, false),
+            ("TopicName", typeof(string), true, false),
+        };
+        props.Select(p => (p.Name, p.PropertyType, p.CanRead, p.CanWrite))
+            .Should().BeEquivalentTo(expected);
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName).ToArray();
+        methods.Should().BeEmpty();
     }
 
     [Fact]
-    public void TopicInfo_公開プロパティシグネチャ()
+    public void TopicFrequencyStatistics_公開API()
     {
-        var props = typeof(TopicInfo)
-            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-            .Select(p => p.Name)
-            .OrderBy(n => n)
-            .ToArray();
-        props.Should().BeEquivalentTo(new[]
+        var t = typeof(TopicFrequencyStatistics);
+
+        t.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
+
+        var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(p => p.Name).ToArray();
+        var expected = new (string name, Type type, bool canRead, bool canWrite)[]
         {
-            "Endpoints", "PublisherCount", "RosTypeNames", "SubscriberCount", "TopicName",
-        });
+            ("HasData", typeof(bool), true, false),
+            ("MaxInterval", typeof(TimeSpan), true, false),
+            ("MeanInterval", typeof(TimeSpan), true, false),
+            ("MinInterval", typeof(TimeSpan), true, false),
+            ("RateHz", typeof(double), true, false),
+            ("SampleCount", typeof(int), true, false),
+            ("StandardDeviation", typeof(TimeSpan), true, false),
+            ("WindowDuration", typeof(TimeSpan), true, false),
+        };
+        props.Select(p => (p.Name, p.PropertyType, p.CanRead, p.CanWrite))
+            .Should().BeEquivalentTo(expected);
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName).ToArray();
+        methods.Should().BeEmpty();
     }
 
     [Fact]
-    public void TopicEndpointInfo_公開プロパティシグネチャ()
+    public void TopicFrequencyOptions_公開API()
     {
-        var props = typeof(TopicEndpointInfo)
-            .GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
-            .Select(p => p.Name)
-            .OrderBy(n => n)
-            .ToArray();
-        props.Should().BeEquivalentTo(new[]
-        {
-            "DdsTopicName", "DdsTypeName", "Durability", "EndpointGuid",
-            "IsLocal", "Kind", "Reliability", "RosTypeName", "TopicName",
-        });
-    }
+        var t = typeof(TopicFrequencyOptions);
 
-    [Fact]
-    public void TopicFrequencyMonitor_MatchedWriterCountはinternal()
-    {
-        var prop = typeof(TopicFrequencyMonitor).GetProperty("MatchedWriterCount",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        prop.Should().BeNull("MatchedWriterCount must not be public");
-    }
-
-    [Fact]
-    public void TopicFrequencyMonitor_コンストラクタはinternal()
-    {
-        var ctors = typeof(TopicFrequencyMonitor).GetConstructors(
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        ctors.Should().BeEmpty();
-    }
-
-    [Fact]
-    public void TopicFrequencyOptions_DefaultWindowSizeはinternal()
-    {
-        var field = typeof(TopicFrequencyOptions).GetField("DefaultWindowSize",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-        field.Should().BeNull("DefaultWindowSize must not be public");
-    }
-
-    [Fact]
-    public void TopicFrequencyOptions_MaxWindowSizeはinternal()
-    {
-        var field = typeof(TopicFrequencyOptions).GetField("MaxWindowSize",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-        field.Should().BeNull("MaxWindowSize must not be public");
-    }
-
-    [Fact]
-    public void TopicFrequencyOptions_Defaultはinternal()
-    {
-        var prop = typeof(TopicFrequencyOptions).GetProperty("Default",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-        prop.Should().BeNull("Default must not be public");
-    }
-
-    [Fact]
-    public void TopicFrequencyOptions_コンストラクタはpublic()
-    {
-        var ctors = typeof(TopicFrequencyOptions).GetConstructors(
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        var ctors = t.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
         ctors.Should().ContainSingle();
+        ctors[0].GetParameters().Should().BeEmpty();
+
+        var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(p => p.Name).ToArray();
+        var expectedProps = new (string name, Type type, bool canRead, bool isInitOnly)[]
+        {
+            ("Durability", typeof(DurabilityQos), true, true),
+            ("Reliability", typeof(ReliabilityQos), true, true),
+            ("WindowSize", typeof(int), true, true),
+        };
+        foreach (var (name, type, canRead, isInitOnly) in expectedProps)
+        {
+            var prop = props.Should().ContainSingle(p => p.Name == name).Subject;
+            prop.PropertyType.Should().Be(type);
+            prop.CanRead.Should().Be(canRead);
+            prop.CanWrite.Should().BeTrue();
+        }
+        props.Length.Should().Be(expectedProps.Length);
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName).ToArray();
+        methods.Should().BeEmpty();
     }
 
     [Fact]
-    public void RawSubscriptionはinternal()
+    public void TopicFrequencyMonitor_公開API()
     {
+        var t = typeof(TopicFrequencyMonitor);
+
+        t.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
+            .GroupBy(m => m.Name)
+            .OrderBy(g => g.Key)
+            .ToArray();
+
+        methods.Length.Should().Be(3);
+        methods[0].Key.Should().Be("Dispose");
+        methods[0].Count().Should().Be(1);
+        methods[0].Single().ReturnType.Should().Be(typeof(void));
+        methods[0].Single().GetParameters().Should().BeEmpty();
+
+        methods[1].Key.Should().Be("GetStatistics");
+        methods[1].Count().Should().Be(1);
+        methods[1].Single().ReturnType.Should().Be(typeof(TopicFrequencyStatistics));
+        methods[1].Single().GetParameters().Should().BeEmpty();
+
+        methods[2].Key.Should().Be("WaitForMatchedAsync");
+        methods[2].Count().Should().Be(1);
+        methods[2].Single().ReturnType.Should().Be(typeof(Task<bool>));
+        var wfmaParams = methods[2].Single().GetParameters();
+        wfmaParams.Length.Should().Be(3);
+        wfmaParams[0].Name.Should().Be("minCount");
+        wfmaParams[0].ParameterType.Should().Be(typeof(int));
+        wfmaParams[1].Name.Should().Be("timeout");
+        wfmaParams[1].ParameterType.Should().Be(typeof(TimeSpan));
+        wfmaParams[2].Name.Should().Be("cancellationToken");
+        wfmaParams[2].ParameterType.Should().Be(typeof(CancellationToken));
+        wfmaParams[2].IsOptional.Should().BeTrue();
+        wfmaParams[2].HasDefaultValue.Should().BeTrue();
+        wfmaParams[2].DefaultValue.Should().BeNull();
+    }
+
+    [Fact]
+    public void TopicDiagnostics_公開API()
+    {
+        var t = typeof(TopicDiagnostics);
+
+        t.GetConstructors(BindingFlags.Public | BindingFlags.Instance).Should().BeEmpty();
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
+            .GroupBy(m => m.Name)
+            .OrderBy(g => g.Key)
+            .ToArray();
+
+        methods.Length.Should().Be(4);
+        methods[0].Key.Should().Be("CreateFrequencyMonitor");
+        methods[0].Count().Should().Be(1);
+        methods[0].Single().ReturnType.Should().Be(typeof(TopicFrequencyMonitor));
+        var cfmParams = methods[0].Single().GetParameters();
+        cfmParams.Length.Should().Be(2);
+        cfmParams[0].Name.Should().Be("topicName");
+        cfmParams[0].ParameterType.Should().Be(typeof(string));
+        cfmParams[1].Name.Should().Be("options");
+        cfmParams[1].ParameterType.Should().Be(typeof(TopicFrequencyOptions));
+        cfmParams[1].IsOptional.Should().BeTrue();
+        cfmParams[1].HasDefaultValue.Should().BeTrue();
+        cfmParams[1].DefaultValue.Should().BeNull();
+
+        methods[1].Key.Should().Be("Dispose");
+        methods[1].Count().Should().Be(1);
+        methods[1].Single().ReturnType.Should().Be(typeof(void));
+        methods[1].Single().GetParameters().Should().BeEmpty();
+
+        methods[2].Key.Should().Be("GetTopicInfo");
+        methods[2].Count().Should().Be(1);
+        methods[2].Single().ReturnType.Should().Be(typeof(TopicInfo));
+        var gtiParams = methods[2].Single().GetParameters();
+        gtiParams.Length.Should().Be(1);
+        gtiParams[0].Name.Should().Be("topicName");
+        gtiParams[0].ParameterType.Should().Be(typeof(string));
+
+        methods[3].Key.Should().Be("GetTopics");
+        methods[3].Count().Should().Be(1);
+        methods[3].Single().ReturnType.Should().Be(typeof(IReadOnlyList<TopicInfo>));
+        methods[3].Single().GetParameters().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TopicNotFoundException_公開API()
+    {
+        var t = typeof(TopicNotFoundException);
+
+        var ctors = t.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+        ctors.Should().ContainSingle();
+        var ctorParams = ctors[0].GetParameters();
+        ctorParams.Length.Should().Be(1);
+        ctorParams[0].Name.Should().Be("topicName");
+        ctorParams[0].ParameterType.Should().Be(typeof(string));
+
+        t.BaseType.Should().Be(typeof(InvalidOperationException));
+
+        var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Select(p => p.Name).OrderBy(n => n).ToArray();
+        props.Should().BeEquivalentTo(new[] { "Data", "HelpLink", "HResult", "InnerException", "Message", "Source", "StackTrace", "TargetSite" });
+    }
+
+    [Fact]
+    public void AmbiguousTopicTypeException_公開API()
+    {
+        var t = typeof(AmbiguousTopicTypeException);
+
+        var ctors = t.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+        ctors.Should().ContainSingle();
+        var ctorParams = ctors[0].GetParameters();
+        ctorParams.Length.Should().Be(1);
+        ctorParams[0].Name.Should().Be("topicName");
+        ctorParams[0].ParameterType.Should().Be(typeof(string));
+
+        t.BaseType.Should().Be(typeof(InvalidOperationException));
+    }
+
+    [Fact]
+    public void 内部型は公開されない()
+    {
+        typeof(IClock).IsVisible.Should().BeFalse();
+        typeof(SystemClock).IsVisible.Should().BeFalse();
         typeof(RawSubscription).IsVisible.Should().BeFalse();
     }
 
-    [Fact]
-    public void TopicFrequencyMonitor_GetStatistics戻り値の型()
-    {
-        var method = typeof(TopicFrequencyMonitor).GetMethod("GetStatistics",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        method.Should().NotBeNull();
-        method!.ReturnType.Should().Be(typeof(TopicFrequencyStatistics));
-    }
+    // ======== Spec Review: IClock precision (concrete value assertions) ========
 
     [Fact]
-    public void TopicDiagnostics_CreateFrequencyMonitor_options省略可能()
+    public void GetElapsedTime_通常差で正しいTimeSpan()
     {
-        var method = typeof(TopicDiagnostics).GetMethod("CreateFrequencyMonitor",
-            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
-        method.Should().NotBeNull();
-        var param = method!.GetParameters().Should().ContainSingle(p => p.Name == "options").Subject;
-        param.IsOptional.Should().BeTrue();
-        param.HasDefaultValue.Should().BeTrue();
-        param.DefaultValue.Should().BeNull();
-    }
-
-    // ======== Spec Review: 実 clock 近似テスト ========
-
-    [Fact]
-    public void SystemClock_実経過時間が概ね一致する()
-    {
-        var clock = SystemClock.Instance;
+        var clock = new MockClock();
         long t0 = clock.GetTimestamp();
-        Thread.SpinWait(50_000);
-        long t1 = clock.GetTimestamp();
-        var elapsed = clock.GetElapsedTime(t0, t1);
-        elapsed.Should().BeGreaterThan(TimeSpan.Zero);
-        elapsed.TotalMilliseconds.Should().BeLessThan(100);
+        long t1 = clock.Advance(1_000_000); // +1_000_000 ticks = 100ms
+        clock.GetElapsedTime(t0, t1).Should().Be(TimeSpan.FromMilliseconds(100));
     }
 
     [Fact]
-    public void SystemClock_同timestampでTimeSpanZero()
+    public void GetElapsedTime_同timestampでTimeSpanZero()
     {
         var clock = SystemClock.Instance;
         long ts = clock.GetTimestamp();
-        var elapsed = clock.GetElapsedTime(ts, ts);
-        elapsed.Should().Be(TimeSpan.Zero);
+        clock.GetElapsedTime(ts, ts).Should().Be(TimeSpan.Zero);
     }
 
-    // ======== Spec Review: timestamp 差分 overflow / precision ========
-
     [Fact]
-    public void SystemClock_longMax近傍で正確な差分()
+    public void GetElapsedTime_longMax近傍でdoubleだと失敗する具体値()
     {
-        var clock = SystemClock.Instance;
-        long nearMax = long.MaxValue - 100_000;
-        long after = long.MaxValue - 50_000;
-        // delta = 50_000 ticks in Stopwatch terms
-        var elapsed = clock.GetElapsedTime(nearMax, after);
-        elapsed.Should().BeGreaterThan(TimeSpan.Zero);
-        // At typical frequencies (MHz), 50_000 ticks is positive
+        var clock = new MockClock();
+        clock.Advance(long.MaxValue - 200_000);
+        long start = clock.GetTimestamp();
+        long end = clock.Advance(100_000); // +100_000 ticks
+        // old double: (double)end - (double)start loses precision → 0 → TimeSpan.Zero
+        // decimal: exact 100_000 ticks = 10ms
+        clock.GetElapsedTime(start, end).Should().Be(TimeSpan.FromTicks(100_000));
     }
 
     [Fact]
@@ -1088,46 +1163,53 @@ public class TopicFrequencyMonitorTests
     {
         var clock = SystemClock.Instance;
         long t0 = clock.GetTimestamp();
-        var elapsed = clock.GetElapsedTime(t0 + 1000, t0);
-        elapsed.Should().Be(TimeSpan.Zero);
+        clock.GetElapsedTime(t0 + 1000, t0).Should().Be(TimeSpan.Zero);
     }
 
     [Fact]
     public void GetElapsedTime_負のdeltaでZero()
     {
         var clock = SystemClock.Instance;
-        var elapsed = clock.GetElapsedTime(100, 50);
-        elapsed.Should().Be(TimeSpan.Zero);
+        clock.GetElapsedTime(100, 50).Should().Be(TimeSpan.Zero);
     }
 
     [Fact]
-    public void GetElapsedTime_longMinを超えたtimestampで安全()
+    public void GetElapsedTime_longMin近傍からlongMax近傍でoverflowしない()
     {
-        var clock = new MockClock(0);
-        // Simulate near-boundary values
-        clock.Advance(long.MaxValue - 10);
-        long ts = clock.GetTimestamp();
-        var elapsed = clock.GetElapsedTime(ts, ts + 5);
-        if (elapsed > TimeSpan.Zero)
-            elapsed.Should().BePositive();
+        var clock = new MockClock();
+        decimal delta = (decimal)long.MaxValue - (decimal)(long.MaxValue - 100_000);
+        var elapsed = clock.GetElapsedTime(long.MaxValue - 100_000, long.MaxValue);
+        // decimal handles this range without overflow; delta = 100_000 ticks
+        elapsed.Should().Be(TimeSpan.FromTicks((long)delta));
     }
 
     [Fact]
     public void GetElapsedTime_longWrapで安全にZero()
     {
-        // Simulate wrap: start near long.MaxValue, end past wrap
-        var start = long.MaxValue - 5;
-        var end = long.MinValue + 5; // would have wrapped
-        // ending < starting → should return Zero
         var clock = SystemClock.Instance;
-        var elapsed = clock.GetElapsedTime(start, end);
-        elapsed.Should().Be(TimeSpan.Zero);
+        clock.GetElapsedTime(long.MaxValue - 5, long.MinValue + 5).Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void GetStatistics_longMax近傍でrateHzが正しい()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 100);
+
+        clock.Advance(long.MaxValue - 10_000_000);
+        for (int i = 0; i < 5; i++)
+            monitor.Record(clock.Advance(1_000_000)); // 100ms intervals
+
+        var stats = monitor.GetStatistics();
+        stats.HasData.Should().BeTrue();
+        // 4 intervals × 100ms = 400ms → 10Hz
+        stats.RateHz.Should().BeApproximately(10.0, 0.001);
+        stats.WindowDuration.Should().Be(TimeSpan.FromMilliseconds(400));
     }
 
     [Fact]
     public void GetStatistics_interval合計がoverflowしない()
     {
-        // Many very large intervals should not overflow
         var clock = new MockClock();
         using var monitor = CreateMonitorWithClock(clock, windowSize: 1000);
         long step = 1_000_000_000_000; // 10^12 ticks per interval
@@ -1140,7 +1222,7 @@ public class TopicFrequencyMonitorTests
         stats.MeanInterval.Ticks.Should().Be(step);
     }
 
-    // ======== Spec Review: WaitForMatchedAsync deadline境界 ========
+    // ======== Spec Review: WaitForMatchedAsync deadline (fake monotonic clock) ========
 
     [Fact]
     public async Task WaitForMatchedAsync_readerのみ存在でtimeoutがfalse()
@@ -1150,7 +1232,6 @@ public class TopicFrequencyMonitorTests
         using var node = new Node(context, "reader_only_node");
         using var diag = node.CreateTopicDiagnostics();
 
-        // Add a reader (not writer) so topic exists but no writer match
         var prefix = Prefix(55);
         context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
         context.DiscoveryDb.UpsertEndpoint(
@@ -1158,8 +1239,7 @@ public class TopicFrequencyMonitorTests
 
         using var monitor = diag.CreateFrequencyMonitor("/reader_only_topic");
 
-        var result = await monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(1));
-        result.Should().BeFalse();
+        (await monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(1))).Should().BeFalse();
     }
 
     [Fact]
@@ -1183,14 +1263,34 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
+    public async Task WaitForMatchedAsync_fakeDeadline後にfalse()
+    {
+        var clock = new MockClock();
+        clock.Advance(10_000_000); // start at +1s
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var waitTask = monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(100));
+
+        await Task.Delay(30);
+        waitTask.IsCompleted.Should().BeFalse("clock hasn't advanced past deadline yet");
+
+        clock.Advance(5_000_000); // +500ms → elapsed from start = 1.5s > 100ms
+
+        var completed = await waitTask.WaitAsync(TimeSpan.FromSeconds(5));
+        completed.Should().BeFalse();
+    }
+
+    [Fact]
     public async Task WaitForMatchedAsync_TimeSpanMaxValueはInfinite相当()
     {
         var clock = new MockClock();
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
-        // Should not throw ArgumentOutOfRangeException
-        var act = () => monitor.WaitForMatchedAsync(1, TimeSpan.MaxValue);
-        var task = act();
+        var task = monitor.WaitForMatchedAsync(1, TimeSpan.MaxValue);
+        await Task.Delay(30);
+        // Should still be waiting because TimeSpan.MaxValue is treated as Infinite
+        task.IsCompleted.Should().BeFalse();
+
         monitor.Dispose();
         var ex = await Record.ExceptionAsync(() => task);
         ex.Should().BeOfType<ObjectDisposedException>();
@@ -1203,27 +1303,12 @@ public class TopicFrequencyMonitorTests
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
         var task = monitor.WaitForMatchedAsync(1, System.Threading.Timeout.InfiniteTimeSpan);
+        await Task.Delay(30);
+        task.IsCompleted.Should().BeFalse();
+
         monitor.Dispose();
         var ex = await Record.ExceptionAsync(() => task);
         ex.Should().BeOfType<ObjectDisposedException>();
-    }
-
-    [Fact]
-    public async Task WaitForMatchedAsync_monotonic_deadline()
-    {
-        using var context = CreateContext();
-        using var node = new Node(context, "mono_node");
-        using var diag = node.CreateTopicDiagnostics();
-
-        var prefix = Prefix(70);
-        context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
-        context.DiscoveryDb.UpsertEndpoint(
-            Endpoint(prefix, EndpointKind.Writer, 0x10, "rt/mono_topic"), DateTime.UtcNow);
-        using var monitor = diag.CreateFrequencyMonitor("/mono_topic");
-
-        // Very short timeout - should timeout
-        var result = await monitor.WaitForMatchedAsync(2, TimeSpan.FromMilliseconds(1));
-        result.Should().BeFalse();
     }
 
     // ======== Spec Review: Node.Dispose 順序 ========

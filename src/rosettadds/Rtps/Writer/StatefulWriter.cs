@@ -39,11 +39,10 @@ public sealed class StatefulWriter : IDisposable, IRtpsSubmessageHandler
     private readonly StatefulWriterPacketSender _sender;
     private readonly BackgroundOperationTracker _tracker;
 
-    private readonly object _lifecycleLock = new();
     private CancellationTokenSource? _cts;
     private Task? _hbLoop;
-    private volatile bool _started;
-    private volatile bool _disposed;
+    private bool _started;
+    private bool _disposed;
 
     public Guid Guid { get; }
     public EntityId WriterEntityId => _writerEntityId;
@@ -219,76 +218,38 @@ public sealed class StatefulWriter : IDisposable, IRtpsSubmessageHandler
 
     public void Start()
     {
-        lock (_lifecycleLock)
-        {
-            ThrowIfDisposed();
-            if (_started) return;
-            if (_cts is null || _cts.IsCancellationRequested)
-            {
-                _cts?.Dispose();
-                _cts = new CancellationTokenSource();
-            }
-            var token = _cts.Token;
-            _hbLoop = Task.Run(() => HeartbeatLoopAsync(token), token);
-            _started = true;
-        }
+        ThrowIfDisposed();
+        if (_started) return;
+        _cts = new CancellationTokenSource();
+        var token = _cts.Token;
+        _hbLoop = Task.Run(() => HeartbeatLoopAsync(token), token);
+        _started = true;
     }
 
     public void Stop()
     {
-        Task? hbLoop;
-        lock (_lifecycleLock)
-        {
-            if (!_started) return;
-            _started = false;
-            if (_cts is null) return;
-            _cts.Cancel();
-            hbLoop = _hbLoop;
-            _hbLoop = null;
-        }
-        // hbLoop 完了待機は lock 外で行い、Dispose/deadlock を避ける
-        if (hbLoop is not null)
-        {
-            try { hbLoop.Wait(TimeSpan.FromSeconds(1)); }
-            catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException)) { }
-            catch (Exception ex) { _logger.Warn("StatefulWriter heartbeat loop did not exit cleanly", ex); }
-        }
+        if (_cts is null) return;
+        _cts.Cancel();
+        try { _hbLoop?.Wait(TimeSpan.FromSeconds(1)); }
+        catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException)) { }
+        catch (Exception ex) { _logger.Warn("StatefulWriter heartbeat loop did not exit cleanly", ex); }
+        WaitForBackgroundTasks();
+        _cts.Dispose();
+        _cts = null;
+        _hbLoop = null;
+        _started = false;
+    }
+
+    private void WaitForBackgroundTasks()
+    {
         _tracker.WaitForCompletion(TimeSpan.FromSeconds(1));
-        // Keep _cts alive (cancelled) so RunBackground can use the cancelled token
     }
 
     public void Dispose()
     {
-        Task? hbLoop;
-        lock (_lifecycleLock)
-        {
-            if (_disposed) return;
-            _disposed = true;
-            if (_cts is not null)
-            {
-                _cts.Cancel();
-                hbLoop = _hbLoop;
-                _hbLoop = null;
-            }
-            else
-            {
-                hbLoop = null;
-            }
-        }
-        // hbLoop 完了待機は lock 外 (deadlock回避)
-        if (hbLoop is not null)
-        {
-            try { hbLoop.Wait(); }
-            catch (AggregateException ex) when (ex.InnerExceptions.All(e => e is OperationCanceledException)) { }
-            catch (Exception ex) { _logger.Warn("StatefulWriter heartbeat loop did not exit cleanly", ex); }
-        }
-        // tracker を Dispose: registration gate を閉じ、全 background task 完了を待つ
-        _tracker.Dispose();
-        lock (_lifecycleLock)
-        {
-            _cts?.Dispose();
-            _cts = null;
-        }
+        if (_disposed) return;
+        _disposed = true;
+        Stop();
         _history.Dispose();
     }
 
@@ -367,13 +328,9 @@ public sealed class StatefulWriter : IDisposable, IRtpsSubmessageHandler
 
     private void RunBackground(Func<CancellationToken, Task> operation, string operationName)
     {
-        CancellationToken token;
-        lock (_lifecycleLock)
-        {
-            if (_disposed) return;
-            token = _cts?.Token ?? CancellationToken.None;
-            _tracker.Run(operation, operationName, token);
-        }
+        if (_disposed) return;
+        var token = _cts?.Token ?? CancellationToken.None;
+        _tracker.Run(operation, operationName, token);
     }
 
     private async ValueTask SendHeartbeatToAllAsync(CancellationToken cancellationToken)

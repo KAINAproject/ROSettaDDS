@@ -4,8 +4,8 @@ namespace ROSettaDDS.Rcl.Diagnostics;
 
 public sealed class TopicFrequencyOptions
 {
-    public const int DefaultWindowSize = 10000;
-    public const int MaxWindowSize = 1_000_000;
+    internal const int DefaultWindowSize = 10000;
+    private const int MaxWindowSize = 1_000_000;
 
     private int _windowSize = DefaultWindowSize;
 
@@ -25,5 +25,5 @@ public sealed class TopicFrequencyOptions
     public ReliabilityQos Reliability { get; init; } = ReliabilityQos.BestEffort;
     public DurabilityQos Durability { get; init; } = DurabilityQos.Volatile;
 
-    public static TopicFrequencyOptions Default { get; } = new();
+    internal static TopicFrequencyOptions Default { get; } = new();
 }

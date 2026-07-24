@@ -38,7 +38,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
             options.Reliability, options.Durability);
     }
 
-    public int MatchedWriterCount => _rawSub?.MatchedWriterCount ?? 0;
+    internal int MatchedWriterCount => _rawSub?.MatchedWriterCount ?? 0;
 
     internal void Record(long timestamp)
     {
@@ -80,7 +80,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
 
             long minIntervalTicks = long.MaxValue;
             long maxIntervalTicks = long.MinValue;
-            long sumIntervalTicks = 0;
+            decimal sumIntervalTicks = 0;
 
             for (int i = 0; i < intervalCount; i++)
             {
@@ -91,7 +91,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
                 sumIntervalTicks += ticks;
             }
 
-            double meanTicks = (double)sumIntervalTicks / intervalCount;
+            double meanTicks = (double)(sumIntervalTicks / intervalCount);
 
             double sumSquaredDiffs = 0;
             for (int i = 0; i < intervalCount; i++)
@@ -133,20 +133,28 @@ public sealed class TopicFrequencyMonitor : IDisposable
         if (timeout == TimeSpan.Zero)
             return false;
 
-        var deadline = timeout != System.Threading.Timeout.InfiniteTimeSpan
-            ? DateTime.UtcNow + timeout
-            : DateTime.MaxValue;
+        var hasTimeout = timeout != System.Threading.Timeout.InfiniteTimeSpan && timeout != TimeSpan.MaxValue;
+        long startTimestamp = 0;
+        decimal timeoutSeconds = 0;
+        if (hasTimeout)
+        {
+            startTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+            timeoutSeconds = (decimal)timeout.TotalSeconds;
+        }
+
         while (true)
         {
-            if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
+            if (hasTimeout)
             {
-                if (timeout != System.Threading.Timeout.InfiniteTimeSpan && DateTime.UtcNow >= deadline)
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                decimal delta = (decimal)now - (decimal)startTimestamp;
+                decimal elapsedSeconds = delta / System.Diagnostics.Stopwatch.Frequency;
+                if (elapsedSeconds >= timeoutSeconds)
                     return false;
-                return true;
             }
 
-            if (timeout != System.Threading.Timeout.InfiniteTimeSpan && DateTime.UtcNow >= deadline)
-                return false;
+            if (_rawSub is not null && _rawSub.MatchedWriterCount >= minCount)
+                return true;
 
             try
             {

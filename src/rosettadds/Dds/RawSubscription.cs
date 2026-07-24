@@ -4,7 +4,7 @@ using Guid = ROSettaDDS.Common.Guid;
 
 namespace ROSettaDDS.Dds;
 
-public sealed class RawSubscription : IDisposable
+internal sealed class RawSubscription : IDisposable
 {
     private readonly IUserReader _reader;
     private readonly Action<ReadOnlyMemory<byte>, GuidPrefix> _callback;

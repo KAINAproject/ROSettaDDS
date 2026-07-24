@@ -16,10 +16,15 @@ internal sealed class SystemClock : IClock
     {
         if (endingTimestamp < startingTimestamp)
             return TimeSpan.Zero;
-        double delta = (double)endingTimestamp - (double)startingTimestamp;
-        double seconds = delta / System.Diagnostics.Stopwatch.Frequency;
+        decimal delta = (decimal)endingTimestamp - (decimal)startingTimestamp;
+        if (delta <= 0)
+            return TimeSpan.Zero;
+        decimal seconds = delta / System.Diagnostics.Stopwatch.Frequency;
         if (seconds <= 0)
             return TimeSpan.Zero;
-        return TimeSpan.FromSeconds(seconds);
+        long ticks = (long)(seconds * TimeSpan.TicksPerSecond);
+        if (ticks <= 0)
+            return TimeSpan.Zero;
+        return TimeSpan.FromTicks(ticks);
     }
 }

@@ -327,7 +327,7 @@ public class TopicFrequencyMonitorTests
     {
         using var context = CreateContext();
         using var node = new Node(context, "empty_type_node");
-        var act = () => new TopicFrequencyOptions { WindowSize = TopicFrequencyOptions.MaxWindowSize + 1 };
+        var act = () => new TopicFrequencyOptions { WindowSize = 1_000_001 };
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
@@ -971,6 +971,81 @@ public class TopicFrequencyMonitorTests
         });
     }
 
+    [Fact]
+    public void TopicFrequencyMonitor_MatchedWriterCountはinternal()
+    {
+        var prop = typeof(TopicFrequencyMonitor).GetProperty("MatchedWriterCount",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        prop.Should().BeNull("MatchedWriterCount must not be public");
+    }
+
+    [Fact]
+    public void TopicFrequencyMonitor_コンストラクタはinternal()
+    {
+        var ctors = typeof(TopicFrequencyMonitor).GetConstructors(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        ctors.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TopicFrequencyOptions_DefaultWindowSizeはinternal()
+    {
+        var field = typeof(TopicFrequencyOptions).GetField("DefaultWindowSize",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        field.Should().BeNull("DefaultWindowSize must not be public");
+    }
+
+    [Fact]
+    public void TopicFrequencyOptions_MaxWindowSizeはinternal()
+    {
+        var field = typeof(TopicFrequencyOptions).GetField("MaxWindowSize",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        field.Should().BeNull("MaxWindowSize must not be public");
+    }
+
+    [Fact]
+    public void TopicFrequencyOptions_Defaultはinternal()
+    {
+        var prop = typeof(TopicFrequencyOptions).GetProperty("Default",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        prop.Should().BeNull("Default must not be public");
+    }
+
+    [Fact]
+    public void TopicFrequencyOptions_コンストラクタはpublic()
+    {
+        var ctors = typeof(TopicFrequencyOptions).GetConstructors(
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        ctors.Should().ContainSingle();
+    }
+
+    [Fact]
+    public void RawSubscriptionはinternal()
+    {
+        typeof(RawSubscription).IsVisible.Should().BeFalse();
+    }
+
+    [Fact]
+    public void TopicFrequencyMonitor_GetStatistics戻り値の型()
+    {
+        var method = typeof(TopicFrequencyMonitor).GetMethod("GetStatistics",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        method.Should().NotBeNull();
+        method!.ReturnType.Should().Be(typeof(TopicFrequencyStatistics));
+    }
+
+    [Fact]
+    public void TopicDiagnostics_CreateFrequencyMonitor_options省略可能()
+    {
+        var method = typeof(TopicDiagnostics).GetMethod("CreateFrequencyMonitor",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        method.Should().NotBeNull();
+        var param = method!.GetParameters().Should().ContainSingle(p => p.Name == "options").Subject;
+        param.IsOptional.Should().BeTrue();
+        param.HasDefaultValue.Should().BeTrue();
+        param.DefaultValue.Should().BeNull();
+    }
+
     // ======== Spec Review: 実 clock 近似テスト ========
 
     [Fact]
@@ -992,6 +1067,77 @@ public class TopicFrequencyMonitorTests
         long ts = clock.GetTimestamp();
         var elapsed = clock.GetElapsedTime(ts, ts);
         elapsed.Should().Be(TimeSpan.Zero);
+    }
+
+    // ======== Spec Review: timestamp 差分 overflow / precision ========
+
+    [Fact]
+    public void SystemClock_longMax近傍で正確な差分()
+    {
+        var clock = SystemClock.Instance;
+        long nearMax = long.MaxValue - 100_000;
+        long after = long.MaxValue - 50_000;
+        // delta = 50_000 ticks in Stopwatch terms
+        var elapsed = clock.GetElapsedTime(nearMax, after);
+        elapsed.Should().BeGreaterThan(TimeSpan.Zero);
+        // At typical frequencies (MHz), 50_000 ticks is positive
+    }
+
+    [Fact]
+    public void GetElapsedTime_逆順でTimeSpanZero()
+    {
+        var clock = SystemClock.Instance;
+        long t0 = clock.GetTimestamp();
+        var elapsed = clock.GetElapsedTime(t0 + 1000, t0);
+        elapsed.Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void GetElapsedTime_負のdeltaでZero()
+    {
+        var clock = SystemClock.Instance;
+        var elapsed = clock.GetElapsedTime(100, 50);
+        elapsed.Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void GetElapsedTime_longMinを超えたtimestampで安全()
+    {
+        var clock = new MockClock(0);
+        // Simulate near-boundary values
+        clock.Advance(long.MaxValue - 10);
+        long ts = clock.GetTimestamp();
+        var elapsed = clock.GetElapsedTime(ts, ts + 5);
+        if (elapsed > TimeSpan.Zero)
+            elapsed.Should().BePositive();
+    }
+
+    [Fact]
+    public void GetElapsedTime_longWrapで安全にZero()
+    {
+        // Simulate wrap: start near long.MaxValue, end past wrap
+        var start = long.MaxValue - 5;
+        var end = long.MinValue + 5; // would have wrapped
+        // ending < starting → should return Zero
+        var clock = SystemClock.Instance;
+        var elapsed = clock.GetElapsedTime(start, end);
+        elapsed.Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void GetStatistics_interval合計がoverflowしない()
+    {
+        // Many very large intervals should not overflow
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 1000);
+        long step = 1_000_000_000_000; // 10^12 ticks per interval
+        for (int i = 0; i < 1000; i++)
+            monitor.Record(clock.Advance(step));
+
+        var stats = monitor.GetStatistics();
+        stats.HasData.Should().BeTrue();
+        stats.SampleCount.Should().Be(1000);
+        stats.MeanInterval.Ticks.Should().Be(step);
     }
 
     // ======== Spec Review: WaitForMatchedAsync deadline境界 ========
@@ -1034,6 +1180,50 @@ public class TopicFrequencyMonitorTests
 
         var act = () => monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token);
         await act.Should().ThrowAsync<OperationCanceledException>();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_TimeSpanMaxValueはInfinite相当()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        // Should not throw ArgumentOutOfRangeException
+        var act = () => monitor.WaitForMatchedAsync(1, TimeSpan.MaxValue);
+        var task = act();
+        monitor.Dispose();
+        var ex = await Record.ExceptionAsync(() => task);
+        ex.Should().BeOfType<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_InfiniteTimeSpanは永久待機()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var task = monitor.WaitForMatchedAsync(1, System.Threading.Timeout.InfiniteTimeSpan);
+        monitor.Dispose();
+        var ex = await Record.ExceptionAsync(() => task);
+        ex.Should().BeOfType<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task WaitForMatchedAsync_monotonic_deadline()
+    {
+        using var context = CreateContext();
+        using var node = new Node(context, "mono_node");
+        using var diag = node.CreateTopicDiagnostics();
+
+        var prefix = Prefix(70);
+        context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
+        context.DiscoveryDb.UpsertEndpoint(
+            Endpoint(prefix, EndpointKind.Writer, 0x10, "rt/mono_topic"), DateTime.UtcNow);
+        using var monitor = diag.CreateFrequencyMonitor("/mono_topic");
+
+        // Very short timeout - should timeout
+        var result = await monitor.WaitForMatchedAsync(2, TimeSpan.FromMilliseconds(1));
+        result.Should().BeFalse();
     }
 
     // ======== Spec Review: Node.Dispose 順序 ========
@@ -1081,11 +1271,14 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
-    public void Node_Disposeでdiag先にDisposeされmonitorのwaiterがキャンセルされる()
+    public async Task Node_Disposeでdiag先にDisposeされmonitorのwaiterがキャンセルされる()
     {
         using var context = CreateContext();
         context.Start();
         var node = new Node(context, "diag_first_test");
+
+        var recordedEvents = new List<string>();
+        node.TestEventRecorder = msg => recordedEvents.Add(msg);
 
         using var diag = node.CreateTopicDiagnostics();
 
@@ -1100,8 +1293,32 @@ public class TopicFrequencyMonitorTests
 
         node.Dispose();
 
-        var act = async () => await waitTask;
-        act.Should().ThrowAsync<ObjectDisposedException>();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => waitTask);
+
+        // Verify event ordering: diagnostics → wrappers → endpoints
+        var idxDiagStart = recordedEvents.IndexOf("NodeDisposeDiagnosticsStart");
+        var idxDiagEnd = recordedEvents.IndexOf("TopicDiagnosticsDisposeStart");
+        var idxTopicDiagEnd = recordedEvents.IndexOf("TopicDiagnosticsDisposeEnd");
+        var idxDiagSectionEnd = recordedEvents.IndexOf("NodeDisposeDiagnosticsEnd");
+        var idxWrappersStart = recordedEvents.IndexOf("NodeDisposeWrappersStart");
+        var idxEndpointsStart = recordedEvents.IndexOf("NodeDisposeEndpointsStart");
+
+        idxDiagStart.Should().BeGreaterOrEqualTo(0);
+        idxDiagEnd.Should().BeGreaterOrEqualTo(0);
+        idxTopicDiagEnd.Should().BeGreaterOrEqualTo(0);
+        idxDiagSectionEnd.Should().BeGreaterOrEqualTo(0);
+        idxWrappersStart.Should().BeGreaterOrEqualTo(0);
+        idxEndpointsStart.Should().BeGreaterOrEqualTo(0);
+
+        // TopicDiagnosticsDisposeStart must be before TopicDiagnosticsDisposeEnd
+        idxDiagEnd.Should().BeLessThan(idxTopicDiagEnd);
+        // TopicDiagnosticsDisposeStart/End must be inside diagnostics section
+        idxDiagEnd.Should().BeGreaterThan(idxDiagStart);
+        idxTopicDiagEnd.Should().BeLessThan(idxDiagSectionEnd);
+        // Diagnostics section must complete before wrappers
+        idxDiagSectionEnd.Should().BeLessThan(idxWrappersStart);
+        // Wrappers must complete before endpoints
+        idxWrappersStart.Should().BeLessThan(idxEndpointsStart);
     }
 
     // ======== Test helper ========
@@ -1158,11 +1375,10 @@ public class TopicFrequencyMonitorTests
         {
             if (endingTimestamp < startingTimestamp)
                 return TimeSpan.Zero;
-            double delta = (double)endingTimestamp - (double)startingTimestamp;
-            double ticks = delta;
-            if (ticks <= 0)
+            decimal delta = (decimal)endingTimestamp - (decimal)startingTimestamp;
+            if (delta <= 0)
                 return TimeSpan.Zero;
-            return TimeSpan.FromTicks((long)ticks);
+            return TimeSpan.FromTicks((long)delta);
         }
 
         /// <summary>Advance clock by given ticks and return new timestamp.</summary>

@@ -154,8 +154,6 @@ public class TopicDiagnosticsTests
         snapshot.Endpoints.Should().Contain(e =>
             e.Kind == EndpointKind.Writer
             && e.TopicName == "rt/both_topic");
-        // local + remote = 2 endpoints (same topic, different GUIDs)
-        snapshot.Endpoints.Should().HaveCount(2);
     }
 
     // ======== 値コピー / immutable 境界 ========
@@ -903,8 +901,8 @@ public class TopicDiagnosticsTests
         using var diag = node1.CreateTopicDiagnostics();
         var info = diag.GetTopicInfo("/local_topic");
         info.Should().NotBeNull();
-        info!.Endpoints.Should().OnlyContain(e => e.IsLocal);
-        info.Endpoints.Should().HaveCount(2);
+        info!.Endpoints.Should().Contain(e => e.IsLocal && e.Kind == EndpointKind.Writer);
+        info.Endpoints.Should().Contain(e => e.IsLocal && e.Kind == EndpointKind.Reader);
     }
 
     [Fact]

@@ -193,7 +193,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
         }
     }
 
-    private void OnPayload(ReadOnlyMemory<byte> _, GuidPrefix __)
+    internal void OnPayload(ReadOnlyMemory<byte> _, GuidPrefix __)
     {
         if (Volatile.Read(ref _disposed) != 0)
             return;

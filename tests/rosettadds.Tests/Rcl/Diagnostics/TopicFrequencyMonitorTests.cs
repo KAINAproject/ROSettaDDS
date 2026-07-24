@@ -1964,29 +1964,31 @@ public class TopicFrequencyMonitorTests
         var clock = new MockClock();
         using var monitor = CreateMonitorWithClock(clock, windowSize: 100);
 
-        // 実際の OnPayload callback 経路を模擬: RawSubscription 経由で callback を並行発火
+        // RawSubscription/TestUserReader SimulatePayload → RawSubscription callback
+        // → TopicFrequencyMonitor.OnPayload が clock.GetTimestamp を lock 内で取得する production 経路を通す
         var reader = new TestUserReader(new EntityId(20, EntityKind.UserDefinedReaderNoKey));
         using var raw = new RawSubscription(
             "t", default, reader,
-            (_, _) =>
-            {
-                // Record に clock.Advance の結果を渡すことで timestamp を Record に委譲
-                // (実際の OnPayload と同様に lock 内で処理される)
-                monitor.Record(clock.Advance(1));
-            },
+            monitor.OnPayload,
             autoStart: false);
 
         const int ThreadCount = 8;
         const int PayloadsPerThread = 50;
         var threads = new Thread[ThreadCount];
         var barrier = new Barrier(ThreadCount);
+
+        // 各スレッド内で clock を進めてから SimulatePayload → OnPayload → clock.GetTimestamp
+        // 別スレッドで clock を進めて OnPayload 内の GetTimestamp が異なる値を返すようにする
         for (int i = 0; i < ThreadCount; i++)
         {
             threads[i] = new Thread(() =>
             {
                 barrier.SignalAndWait();
                 for (int j = 0; j < PayloadsPerThread; j++)
+                {
+                    clock.Advance(100_000); // 10ms per payload → 確実に異なる timestamp
                     reader.SimulatePayload(ReadOnlyMemory<byte>.Empty, default);
+                }
             });
         }
 
@@ -2001,6 +2003,8 @@ public class TopicFrequencyMonitorTests
             "no negative intervals under concurrent OnPayload callbacks");
         stats.WindowDuration.Should().BeGreaterThan(TimeSpan.Zero,
             "timestamps span non-zero window");
+
+        // Record(long) 直接呼出を排除: 経路は Advance → SimulatePayload → OnPayload (GetTimestamp in lock) のみ
     }
 
     [Fact]

@@ -308,34 +308,38 @@ public class TopicFrequencyMonitorTests
     public void Disposeとcallback同時実行で破損しない()
     {
         var reader = new TestUserReader(new EntityId(11, EntityKind.UserDefinedReaderNoKey));
-        var raw = new RawSubscription(
-            "t", default, reader, (_, _) => Thread.SpinWait(100), autoStart: false);
-
+        using var callbackEntered = new Barrier(2);
+        using var continueBarrier = new Barrier(2);
         Exception? workerException = null;
-        var signal = new ManualResetEventSlim(false);
+
+        var raw = new RawSubscription(
+            "t", default, reader, (_, _) =>
+            {
+                callbackEntered.SignalAndWait(TimeSpan.FromSeconds(5));
+                continueBarrier.SignalAndWait(TimeSpan.FromSeconds(5));
+            }, autoStart: false);
+
         var callbackThread = new Thread(() =>
         {
             try
             {
-                for (int i = 0; i < 50; i++)
-                    reader.SimulatePayload(new byte[] { (byte)i }, default);
+                reader.SimulatePayload(new byte[] { 1 }, default);
             }
             catch (Exception ex)
             {
                 workerException = ex;
             }
-            finally
-            {
-                signal.Set();
-            }
         });
         callbackThread.Start();
 
-        Thread.SpinWait(50);
+        // Wait for callback to enter, then dispose while callback is held
+        callbackEntered.SignalAndWait(TimeSpan.FromSeconds(5));
         raw.Dispose();
 
+        // Release callback
+        continueBarrier.SignalAndWait(TimeSpan.FromSeconds(5));
+
         callbackThread.Join(TimeSpan.FromSeconds(5)).Should().BeTrue("worker must complete within 5s");
-        signal.Wait(TimeSpan.FromSeconds(1));
 
         if (workerException is not null)
             throw new AggregateException("Worker thread threw exception", workerException);
@@ -1150,7 +1154,13 @@ public class TopicFrequencyMonitorTests
 
         methods[2].Key.Should().Be("GetTopicInfo");
         methods[2].Count().Should().Be(1);
+        // ReturnType should be TopicInfo (non-nullable type ref) adjusted for nullable
         methods[2].Single().ReturnType.Should().Be(typeof(TopicInfo));
+        // Check nullable via NullableAttribute on return parameter (Nullable(2) = nullable)
+        var returnParam = methods[2].Single().ReturnParameter;
+        var nullableAttr = returnParam.GetCustomAttributes(false)
+            .FirstOrDefault(a => a.GetType().Name == "NullableAttribute");
+        nullableAttr.Should().NotBeNull("GetTopicInfo must return nullable TopicInfo?");
         var gtiParams = methods[2].Single().GetParameters();
         gtiParams.Length.Should().Be(1);
         gtiParams[0].Name.Should().Be("topicName");
@@ -1212,6 +1222,66 @@ public class TopicFrequencyMonitorTests
             .First(m => m.Name == "CreateTopicDiagnostics");
         method.ReturnType.Should().Be(typeof(TopicDiagnostics));
         method.GetParameters().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Node_公開API()
+    {
+        var t = typeof(Node);
+
+        var ctors = t.GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+        ctors.Should().ContainSingle();
+        var ctorParams = ctors[0].GetParameters();
+        ctorParams.Length.Should().Be(3);
+        ctorParams[0].Name.Should().Be("context");
+        ctorParams[0].ParameterType.Should().Be(typeof(Context));
+        ctorParams[1].Name.Should().Be("name");
+        ctorParams[1].ParameterType.Should().Be(typeof(string));
+        ctorParams[2].Name.Should().Be("options");
+        ctorParams[2].ParameterType.Should().Be(typeof(NodeOptions));
+        ctorParams[2].IsOptional.Should().BeTrue();
+        ctorParams[2].HasDefaultValue.Should().BeTrue();
+        ctorParams[2].DefaultValue.Should().BeNull();
+
+        var props = t.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .OrderBy(p => p.Name).ToArray();
+        var expectedProps = new (string Name, Type Type, bool CanRead, bool CanWrite)[]
+        {
+            ("Context", typeof(Context), true, false),
+            ("Name", typeof(string), true, false),
+            ("Options", typeof(NodeOptions), true, false),
+        };
+        props.Select(p => (p.Name, p.PropertyType, p.CanRead, p.CanWrite))
+            .Should().BeEquivalentTo(expectedProps);
+
+        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .Where(m => !m.IsSpecialName)
+            .GroupBy(m => m.Name)
+            .OrderBy(g => g.Key)
+            .ToArray();
+
+        // Expected: CreatePublisher(2 overloads), CreateServiceClient, CreateSubscription(2 overloads), CreateTopicDiagnostics, Dispose
+        methods.Length.Should().Be(5);
+        methods[0].Key.Should().Be("CreatePublisher");
+        methods[0].Count().Should().Be(2);
+        methods[0].OrderBy(m => m.GetParameters().Length).First().GetParameters().Length.Should().Be(3);
+        methods[0].OrderByDescending(m => m.GetParameters().Length).First().GetParameters().Length.Should().Be(5);
+
+        methods[1].Key.Should().Be("CreateServiceClient");
+        methods[1].Count().Should().Be(1);
+
+        methods[2].Key.Should().Be("CreateSubscription");
+        methods[2].Count().Should().Be(2);
+
+        methods[3].Key.Should().Be("CreateTopicDiagnostics");
+        methods[3].Count().Should().Be(1);
+        methods[3].Single().ReturnType.Should().Be(typeof(TopicDiagnostics));
+        methods[3].Single().GetParameters().Should().BeEmpty();
+
+        methods[4].Key.Should().Be("Dispose");
+        methods[4].Count().Should().Be(1);
+        methods[4].Single().ReturnType.Should().Be(typeof(void));
+        methods[4].Single().GetParameters().Should().BeEmpty();
     }
 
     [Fact]
@@ -1290,20 +1360,53 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
-    public void SystemClock_GetElapsedTime_longMax近傍でdouble退行しない()
+    public void SystemClock_TicksToTimeSpan_knownValues()
     {
-        var clock = SystemClock.Instance;
+        // frequency = 10_000_000 Hz (100ns per tick, same as TimeSpan.TicksPerSecond)
+        // Independent exact constants: 100_000 / 10_000_000 = 0.01s = 10ms
+        SystemClock.TicksToTimeSpan(100_000, 10_000_000)
+            .Should().Be(TimeSpan.FromMilliseconds(10));
+        // 1_000_000 / 10_000_000 = 0.1s = 100ms
+        SystemClock.TicksToTimeSpan(1_000_000, 10_000_000)
+            .Should().Be(TimeSpan.FromMilliseconds(100));
+        // 10_000_000 ticks at 50 MHz = 0.2s = 200ms
+        SystemClock.TicksToTimeSpan(10_000_000, 50_000_000)
+            .Should().Be(TimeSpan.FromMilliseconds(200));
+    }
+
+    [Fact]
+    public void SystemClock_TicksToTimeSpan_longMax近傍でdouble退行しない()
+    {
+        // 100_000 ticks at 10 MHz = exactly 10ms
+        // (double)long.MaxValue - (double)(long.MaxValue - 100_000) = 0.0 (precision loss)
+        // decimal preserves exact 100_000 → 10ms
         long start = long.MaxValue - 100_000;
         long end = long.MaxValue;
-        var elapsed = clock.GetElapsedTime(start, end);
+        long delta = end - start;
 
-        // decimal-based calculation (same as production SystemClock)
-        decimal delta = (decimal)end - (decimal)start;
-        decimal seconds = delta / System.Diagnostics.Stopwatch.Frequency;
-        var expected = TimeSpan.FromTicks((long)(seconds * TimeSpan.TicksPerSecond));
+        var elapsed = SystemClock.TicksToTimeSpan(delta, 10_000_000);
 
+        // Independent expected constant: 100_000 / 10_000_000 = 10ms
         elapsed.Should().NotBe(TimeSpan.Zero, "double precision loss would return Zero");
-        elapsed.Should().Be(expected);
+        elapsed.Should().Be(TimeSpan.FromMilliseconds(10));
+    }
+
+    [Fact]
+    public void SystemClock_TicksToTimeSpan_負のticksでZero()
+    {
+        SystemClock.TicksToTimeSpan(-1, 10_000_000).Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void SystemClock_TicksToTimeSpan_zeroTicksでZero()
+    {
+        SystemClock.TicksToTimeSpan(0, 10_000_000).Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void SystemClock_TicksToTimeSpan_zeroFrequencyでZero()
+    {
+        SystemClock.TicksToTimeSpan(100_000, 0).Should().Be(TimeSpan.Zero);
     }
 
     [Fact]
@@ -1400,7 +1503,8 @@ public class TopicFrequencyMonitorTests
 
         // deadline後: clock past deadline (+110ms > 100ms)
         clock.Advance(110_000);
-        var completed = await waitTask;
+        // bounded wait: old CancelAfter implementation would hang here
+        var completed = await waitTask.WaitAsync(TimeSpan.FromMilliseconds(100));
         completed.Should().BeFalse("deadline超過でタイムアウト");
     }
 
@@ -1419,7 +1523,7 @@ public class TopicFrequencyMonitorTests
         task.IsCompleted.Should().BeFalse("TimeSpan.MaxValueは無限期待機");
 
         monitor.Dispose();
-        var ex = await Record.ExceptionAsync(() => task);
+        var ex = await Record.ExceptionAsync(() => task).WaitAsync(TimeSpan.FromSeconds(5));
         ex.Should().BeOfType<ObjectDisposedException>();
     }
 
@@ -1437,7 +1541,7 @@ public class TopicFrequencyMonitorTests
         task.IsCompleted.Should().BeFalse("InfiniteTimeSpanは無限期待機");
 
         monitor.Dispose();
-        var ex = await Record.ExceptionAsync(() => task);
+        var ex = await Record.ExceptionAsync(() => task).WaitAsync(TimeSpan.FromSeconds(5));
         ex.Should().BeOfType<ObjectDisposedException>();
     }
 

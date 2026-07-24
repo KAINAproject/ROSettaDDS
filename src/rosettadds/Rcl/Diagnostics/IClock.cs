@@ -19,12 +19,22 @@ internal sealed class SystemClock : IClock
         decimal delta = (decimal)endingTimestamp - (decimal)startingTimestamp;
         if (delta <= 0)
             return TimeSpan.Zero;
-        decimal seconds = delta / System.Diagnostics.Stopwatch.Frequency;
+        var result = TicksToTimeSpan((long)delta, System.Diagnostics.Stopwatch.Frequency);
+        if (result <= TimeSpan.Zero)
+            return TimeSpan.Zero;
+        return result;
+    }
+
+    internal static TimeSpan TicksToTimeSpan(long ticks, long frequency)
+    {
+        if (ticks <= 0 || frequency <= 0)
+            return TimeSpan.Zero;
+        decimal seconds = (decimal)ticks / frequency;
         if (seconds <= 0)
             return TimeSpan.Zero;
-        long ticks = (long)(seconds * TimeSpan.TicksPerSecond);
-        if (ticks <= 0)
+        long resultTicks = (long)(seconds * TimeSpan.TicksPerSecond);
+        if (resultTicks <= 0)
             return TimeSpan.Zero;
-        return TimeSpan.FromTicks(ticks);
+        return TimeSpan.FromTicks(resultTicks);
     }
 }

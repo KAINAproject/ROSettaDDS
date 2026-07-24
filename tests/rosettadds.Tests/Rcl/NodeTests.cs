@@ -208,6 +208,96 @@ public class NodeTests
     }
 
     [Fact]
+    public void BeginRegistrationがThrowIfDisposedとpending_incrementを原子的に行う()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "atomic_test");
+
+        var createStarted = new ManualResetEventSlim();
+        var resumeCreate = new ManualResetEventSlim();
+        Exception? createError = null;
+
+        int? pendingAtCallback = null;
+        node.BeforeCreateStartCallback = () =>
+        {
+            pendingAtCallback = GetPendingRegistrationsField(node);
+            createStarted.Set();
+            resumeCreate.Wait();
+        };
+
+        var waitLoopEntered = new ManualResetEventSlim();
+        int? observedPendingCount = null;
+        node.PendingRegistrationsWaitLoopEntered = (pendingCount) =>
+        {
+            observedPendingCount = pendingCount;
+            waitLoopEntered.Set();
+        };
+
+        var createThread = new Thread(() =>
+        {
+            try
+            {
+                node.CreatePublisher<StringMessage>(
+                    "chatter", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+            }
+            catch (Exception ex)
+            {
+                createError = ex;
+            }
+        });
+        createThread.Start();
+
+        Assert.True(createStarted.Wait(TimeSpan.FromSeconds(5)),
+            "Create must reach callback after BeginRegistration");
+
+        // BeginRegistration が完了 → disposed チェックとインクリメントが済んでいる
+        Assert.True(pendingAtCallback.HasValue);
+        Assert.True(pendingAtCallback!.Value > 0,
+            $"pending must be > 0 after BeginRegistration (was {pendingAtCallback})");
+
+        // Dispose を別スレッドから呼ぶ
+        Exception? disposeError = null;
+        var disposeThread = new Thread(() =>
+        {
+            try
+            {
+                node.Dispose();
+            }
+            catch (Exception ex)
+            {
+                disposeError = ex;
+            }
+        });
+        disposeThread.Start();
+
+        // Dispose は pending > 0 のため spin wait に入る
+        Assert.True(waitLoopEntered.Wait(TimeSpan.FromSeconds(5)),
+            "Dispose must enter pending registration wait loop");
+        Assert.True(observedPendingCount.HasValue);
+        Assert.True(observedPendingCount!.Value > 0,
+            $"observed pending must be > 0 (was {observedPendingCount})");
+
+        // Create スレッドを再開 → disposed チェックで ObjectDisposedException → rollback → pending=0
+        resumeCreate.Set();
+        Assert.True(createThread.Join(TimeSpan.FromSeconds(5)),
+            "CreatePublisher thread must complete after rollback");
+
+        Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)),
+            "Dispose thread must complete after pending registration finishes");
+
+        Assert.Null(disposeError);
+        Assert.NotNull(createError);
+        var odEx = Assert.IsType<ObjectDisposedException>(createError);
+        Assert.Contains(typeof(Node).Name, odEx.ObjectName, StringComparison.Ordinal);
+
+        Assert.True(node.IsDisposed);
+
+        node.BeforeCreateStartCallback = null;
+        node.PendingRegistrationsWaitLoopEntered = null;
+    }
+
+    [Fact]
     public void CreatePublisher_phase2_match_failure_rolls_back()
     {
         using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });

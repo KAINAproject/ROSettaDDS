@@ -36,6 +36,7 @@ public sealed class Node : IDisposable
     internal Action? BeforeDisposedCheckCallback { get; set; }
     internal Action<int>? PendingRegistrationsWaitLoopEntered { get; set; }
     internal Action? BeforeServiceReplyReaderCreateCallback { get; set; }
+    internal Action? BeforeCreateStartCallback { get; set; }
     internal Action<string>? TestEventRecorder { get; set; }
     internal Action? AfterWrapperTracked { get; set; }
 
@@ -99,12 +100,20 @@ public sealed class Node : IDisposable
         DurabilityQos durability,
         string? typeName = null)
     {
-        ThrowIfDisposed();
-        if (string.IsNullOrEmpty(topicName)) throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
-        if (serializer is null) throw new ArgumentNullException(nameof(serializer));
-        return CreateWriterInternal(
-            TopicNameMangler.MangleTopic(topicName), serializer, reliability, durability,
-            typeName, topicName);
+        BeginRegistration();
+        BeforeCreateStartCallback?.Invoke();
+        try
+        {
+            if (string.IsNullOrEmpty(topicName)) throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
+            if (serializer is null) throw new ArgumentNullException(nameof(serializer));
+            return CreateWriterInternal(
+                TopicNameMangler.MangleTopic(topicName), serializer, reliability, durability,
+                typeName, topicName);
+        }
+        finally
+        {
+            EndRegistration();
+        }
     }
 
     public Subscription<T> CreateSubscription<T>(
@@ -115,32 +124,32 @@ public sealed class Node : IDisposable
         SynchronizationContext? handlerContext = null,
         ReliabilityQos? reliability = null)
     {
-        ThrowIfDisposed();
-        if (string.IsNullOrEmpty(topicName)) throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
-        if (serializer is null) throw new ArgumentNullException(nameof(serializer));
-        if (handler is null) throw new ArgumentNullException(nameof(handler));
-
-        var effectiveReliability = reliability ?? ReliabilityQos.Reliable;
-        var ddsTopic = TopicNameMangler.MangleTopic(topicName);
-        var endpoint = _endpointFactory.CreateReader(ddsTopic, serializer, effectiveReliability, typeName);
-        var reader = endpoint.Reader;
-        var endpointGuid = endpoint.EndpointGuid;
-        var endpointData = endpoint.EndpointData;
-
-        var subscription = new Subscription<T>(
-            topicName,
-            endpointGuid,
-            reader,
-            serializer,
-            handler,
-            UnregisterLocalReader,
-            handlerContext,
-            Logger,
-            cdrReadLimits: Context.Options.CdrReadLimits);
-
-        Interlocked.Increment(ref _pendingRegistrations);
+        BeginRegistration();
+        BeforeCreateStartCallback?.Invoke();
         try
         {
+            if (string.IsNullOrEmpty(topicName)) throw new ArgumentException("Value cannot be null or empty.", nameof(topicName));
+            if (serializer is null) throw new ArgumentNullException(nameof(serializer));
+            if (handler is null) throw new ArgumentNullException(nameof(handler));
+
+            var effectiveReliability = reliability ?? ReliabilityQos.Reliable;
+            var ddsTopic = TopicNameMangler.MangleTopic(topicName);
+            var endpoint = _endpointFactory.CreateReader(ddsTopic, serializer, effectiveReliability, typeName);
+            var reader = endpoint.Reader;
+            var endpointGuid = endpoint.EndpointGuid;
+            var endpointData = endpoint.EndpointData;
+
+            var subscription = new Subscription<T>(
+                topicName,
+                endpointGuid,
+                reader,
+                serializer,
+                handler,
+                UnregisterLocalReader,
+                handlerContext,
+                Logger,
+                cdrReadLimits: Context.Options.CdrReadLimits);
+
             Context.GraphLockMutationCallback?.Invoke(Context.GraphLock);
             lock (Context.GraphLock) { _userEndpoints.RegisterReaderMetadata(endpointData, reader); }
             BeforeDisposedCheckCallback?.Invoke();
@@ -182,7 +191,7 @@ public sealed class Node : IDisposable
         }
         finally
         {
-            Interlocked.Decrement(ref _pendingRegistrations);
+            EndRegistration();
         }
     }
 
@@ -206,26 +215,26 @@ public sealed class Node : IDisposable
         ReliabilityQos reliability,
         DurabilityQos durability)
     {
-        ThrowIfDisposed();
-        if (string.IsNullOrEmpty(ddsTopic)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTopic));
-        if (string.IsNullOrEmpty(ddsTypeName)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTypeName));
-        if (callback is null) throw new ArgumentNullException(nameof(callback));
-
-        var endpoint = _endpointFactory.CreateRawReader(ddsTopic, ddsTypeName, reliability, durability);
-        var reader = endpoint.Reader;
-        var endpointGuid = endpoint.EndpointGuid;
-        var endpointData = endpoint.EndpointData;
-
-        var rawSub = new RawSubscription(
-            ddsTopic,
-            endpointGuid,
-            reader,
-            callback,
-            UnregisterLocalReader);
-
-        Interlocked.Increment(ref _pendingRegistrations);
+        BeginRegistration();
+        BeforeCreateStartCallback?.Invoke();
         try
         {
+            if (string.IsNullOrEmpty(ddsTopic)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTopic));
+            if (string.IsNullOrEmpty(ddsTypeName)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTypeName));
+            if (callback is null) throw new ArgumentNullException(nameof(callback));
+
+            var endpoint = _endpointFactory.CreateRawReader(ddsTopic, ddsTypeName, reliability, durability);
+            var reader = endpoint.Reader;
+            var endpointGuid = endpoint.EndpointGuid;
+            var endpointData = endpoint.EndpointData;
+
+            var rawSub = new RawSubscription(
+                ddsTopic,
+                endpointGuid,
+                reader,
+                callback,
+                UnregisterLocalReader);
+
             Context.GraphLockMutationCallback?.Invoke(Context.GraphLock);
             lock (Context.GraphLock) { _userEndpoints.RegisterReaderMetadata(endpointData, reader); }
             BeforeDisposedCheckCallback?.Invoke();
@@ -267,7 +276,7 @@ public sealed class Node : IDisposable
         }
         finally
         {
-            Interlocked.Decrement(ref _pendingRegistrations);
+            EndRegistration();
         }
     }
 
@@ -275,13 +284,12 @@ public sealed class Node : IDisposable
         ServiceDescriptor<TRequest, TResponse> descriptor,
         string serviceName)
     {
-        ThrowIfDisposed();
-        if (descriptor is null) throw new ArgumentNullException(nameof(descriptor));
-        if (string.IsNullOrEmpty(serviceName)) throw new ArgumentException("Value cannot be null or empty.", nameof(serviceName));
-
-        Interlocked.Increment(ref _pendingRegistrations);
+        BeginRegistration();
+        BeforeCreateStartCallback?.Invoke();
         try
         {
+            if (descriptor is null) throw new ArgumentNullException(nameof(descriptor));
+            if (string.IsNullOrEmpty(serviceName)) throw new ArgumentException("Value cannot be null or empty.", nameof(serviceName));
             var requestPublisher = CreateWriterInternal(
                 TopicNameMangler.MangleServiceRequest(serviceName),
                 descriptor.RequestSerializer,
@@ -318,7 +326,7 @@ public sealed class Node : IDisposable
         }
         finally
         {
-            Interlocked.Decrement(ref _pendingRegistrations);
+            EndRegistration();
         }
     }
 
@@ -361,7 +369,7 @@ public sealed class Node : IDisposable
         string? typeName,
         string userTopicName)
     {
-        Interlocked.Increment(ref _pendingRegistrations);
+        BeginRegistration();
         try
         {
             var endpoint = _endpointFactory.CreateWriter(ddsTopic, serializer, reliability, durability, typeName);
@@ -411,13 +419,13 @@ public sealed class Node : IDisposable
         }
         finally
         {
-            Interlocked.Decrement(ref _pendingRegistrations);
+            EndRegistration();
         }
     }
 
     private (ReliableUserReader Reader, Task AdvertiseTask) CreateReliableReplyReaderInternal(string ddsTopic, string ddsTypeName)
     {
-        Interlocked.Increment(ref _pendingRegistrations);
+        BeginRegistration();
         try
         {
             var endpoint = _endpointFactory.CreateReliableReplyReader(ddsTopic, ddsTypeName);
@@ -458,7 +466,7 @@ public sealed class Node : IDisposable
         }
         finally
         {
-            Interlocked.Decrement(ref _pendingRegistrations);
+            EndRegistration();
         }
     }
 
@@ -478,6 +486,7 @@ public sealed class Node : IDisposable
 
         try
         {
+            lock (_disposeGate) { }
             var sw = new SpinWait();
             bool entered = false;
             while (Volatile.Read(ref _pendingRegistrations) > 0)
@@ -612,5 +621,19 @@ public sealed class Node : IDisposable
     private void ThrowIfDisposed()
     {
         if (_disposed != 0) throw new ObjectDisposedException(GetType().Name);
+    }
+
+    private void BeginRegistration()
+    {
+        lock (_disposeGate)
+        {
+            if (_disposed != 0) throw new ObjectDisposedException(GetType().Name);
+            Interlocked.Increment(ref _pendingRegistrations);
+        }
+    }
+
+    private void EndRegistration()
+    {
+        Interlocked.Decrement(ref _pendingRegistrations);
     }
 }

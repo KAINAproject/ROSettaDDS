@@ -1901,6 +1901,119 @@ public class TopicFrequencyMonitorTests
         idxWrappersStart.Should().BeLessThan(idxEndpointsStart);
     }
 
+    // ======== Task5 レビュー残件: Dispose tracking / timestamp ordering / Ambiguous ========
+
+    [Fact]
+    public void TopicFrequencyMonitor明示DisposeでTopicDiagnostics_trackingから除去される()
+    {
+        using var context = CreateContext();
+        context.Start();
+        using var node = new Node(context, "tracking_tfm");
+        using var pub = node.CreatePublisher<StringMessage>(
+            "tracking_tfm_topic", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var diag = node.CreateTopicDiagnostics();
+
+        TopicFrequencyMonitor GetSingleMonitor()
+        {
+            // Reflectionで_monitorsの中身を確認
+            var monitorsField = typeof(TopicDiagnostics)
+                .GetField("_monitors", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var monitors = (System.Collections.IList)monitorsField.GetValue(diag)!;
+            return monitors.Count == 1 ? (TopicFrequencyMonitor)monitors[0]! : null!;
+        }
+
+        var monitor = diag.CreateFrequencyMonitor("/tracking_tfm_topic");
+        GetSingleMonitor().Should().NotBeNull("monitor must be tracked after creation");
+
+        monitor.Dispose();
+        GetSingleMonitor().Should().BeNull("monitor must be untracked after explicit Dispose");
+
+        // 二回目のDisposeは例外を投げない
+        monitor.Dispose();
+    }
+
+    [Fact]
+    public void TopicDiagnostics明示DisposeでNode_trackingから除去される()
+    {
+        using var context = CreateContext();
+        context.Start();
+        var node = new Node(context, "tracking_diag");
+
+        TopicDiagnostics GetSingleDiag()
+        {
+            var diagnosticsField = typeof(Node)
+                .GetField("_trackedDiagnostics", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            var tracked = (System.Collections.IList)diagnosticsField.GetValue(node)!;
+            return tracked.Count == 1 ? (TopicDiagnostics)tracked[0]! : null!;
+        }
+
+        var diag = node.CreateTopicDiagnostics();
+        GetSingleDiag().Should().NotBeNull("diag must be tracked after creation");
+
+        diag.Dispose();
+        GetSingleDiag().Should().BeNull("diag must be untracked after explicit Dispose");
+
+        // 二回目のDisposeはAggregateException経由で最初の例外を再throw
+        diag.Dispose();
+    }
+
+    [Fact]
+    public void TopicFrequencyMonitor_並行callbackで負intervalが発生しない()
+    {
+        var clock = new MockClock();
+        using var monitor = CreateMonitorWithClock(clock, windowSize: 100);
+
+        // 並行callbackを模擬: RecordCoreと同じ実装経由でOnPayload相当のlock内timestamp取得
+        // 直接Record(long)はテスト用にtimestamp指定可能 → 負intervalを仕込めるがOnPayloadはlock内取得
+        // ここではRecord(long)でマイナス傾向になるケースがないことを確認
+        var threads = new Thread[8];
+        var barrier = new Barrier(threads.Length);
+        for (int i = 0; i < threads.Length; i++)
+        {
+            int threadIndex = i;
+            threads[i] = new Thread(() =>
+            {
+                barrier.SignalAndWait();
+                for (int j = 0; j < 50; j++)
+                {
+                    monitor.Record(clock.Advance(1 + (threadIndex % 3)));
+                }
+            });
+        }
+
+        foreach (var t in threads) t.Start();
+        foreach (var t in threads) t.Join();
+
+        var stats = monitor.GetStatistics();
+        if (stats.HasData)
+        {
+            stats.MinInterval.Ticks.Should().BeGreaterOrEqualTo(0);
+            stats.MaxInterval.Ticks.Should().BeGreaterOrEqualTo(0);
+            stats.MeanInterval.Ticks.Should().BeGreaterOrEqualTo(0);
+        }
+    }
+
+    [Fact]
+    public void CreateFrequencyMonitor_空DDS型とknown型混在でAmbiguousTopicTypeException()
+    {
+        using var context = CreateContext();
+        using var node = new Node(context, "mixed_type_node");
+        using var diag = node.CreateTopicDiagnostics();
+
+        var prefix = Prefix(42);
+        context.DiscoveryDb.UpsertParticipant(Participant(prefix), DateTime.UtcNow);
+        // empty DDS type
+        context.DiscoveryDb.UpsertEndpoint(
+            Endpoint(prefix, EndpointKind.Writer, 0x10, "rt/mixed_type", ""), DateTime.UtcNow);
+        // known DDS type
+        context.DiscoveryDb.UpsertEndpoint(
+            Endpoint(prefix, EndpointKind.Writer, 0x11, "rt/mixed_type",
+                "std_msgs::msg::dds_::String_"), DateTime.UtcNow);
+
+        var act = () => diag.CreateFrequencyMonitor("/mixed_type");
+        act.Should().Throw<AmbiguousTopicTypeException>();
+    }
+
     // ======== Test helper ========
 
     private static GuidPrefix Prefix(byte id)

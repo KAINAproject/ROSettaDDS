@@ -13,6 +13,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
     private readonly RawSubscription? _rawSub;
     private readonly object _lock = new();
     private readonly CancellationTokenSource _disposeCts = new();
+    internal Action? RemoveFromTracker { get; set; }
     private int _head;
     private int _count;
     private int _disposed;
@@ -179,6 +180,7 @@ public sealed class TopicFrequencyMonitor : IDisposable
             _disposeCts.Cancel();
             _disposeCts.Dispose();
             _rawSub?.Dispose();
+            RemoveFromTracker?.Invoke();
         }
         catch (Exception ex)
         {
@@ -195,14 +197,9 @@ public sealed class TopicFrequencyMonitor : IDisposable
     {
         if (Volatile.Read(ref _disposed) != 0)
             return;
-        RecordCore(_clock.GetTimestamp());
-    }
-
-    private void RecordCore(long timestamp)
-    {
         lock (_lock)
         {
-            _timestamps[_head] = timestamp;
+            _timestamps[_head] = _clock.GetTimestamp();
             _head = (_head + 1) % _windowSize;
             if (_count < int.MaxValue)
                 _count++;

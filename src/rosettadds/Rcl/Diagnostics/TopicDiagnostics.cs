@@ -22,6 +22,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
 
         /// <summary>Test seam: records lifecycle events for verification.</summary>
     internal Action<string>? TestEventRecorder { get; set; }
+    internal Action? RemoveFromTracker { get; set; }
 
     internal TopicDiagnostics(Node node)
         {
@@ -66,17 +67,17 @@ namespace ROSettaDDS.Rcl.Diagnostics
 
             var ddsTypeNames = topicInfo.Endpoints
                 .Select(e => e.DdsTypeName)
-                .Where(n => !string.IsNullOrEmpty(n))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
 
-            if (ddsTypeNames.Length != 1)
+            if (ddsTypeNames.Length != 1 || string.IsNullOrEmpty(ddsTypeNames[0]))
                 throw new AmbiguousTopicTypeException(topicName);
 
             var ddsTypeName = ddsTypeNames[0];
             var ddsTopic = topicInfo.Endpoints[0].DdsTopicName;
 
             var monitor = new TopicFrequencyMonitor(_node, ddsTopic, ddsTypeName, options, SystemClock.Instance);
+            monitor.RemoveFromTracker = () => { lock (_monitorsLock) _monitors.Remove(monitor); };
             lock (_monitorsLock)
             {
                 if (_disposed != 0 || _node.IsDisposed)
@@ -105,6 +106,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
 
             try
             {
+                RemoveFromTracker?.Invoke();
                 TestEventRecorder?.Invoke("TopicDiagnosticsDisposeStart");
                 TopicFrequencyMonitor[] snapshot;
                 lock (_monitorsLock)

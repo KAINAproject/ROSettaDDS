@@ -337,6 +337,7 @@ public sealed class Node : IDisposable
         ThrowIfDisposed();
         var diag = new TopicDiagnostics(this);
         diag.TestEventRecorder = TestEventRecorder;
+        diag.RemoveFromTracker = () => { lock (_diagnosticsLock) _trackedDiagnostics.Remove(diag); };
         lock (_diagnosticsLock)
         {
             if (_disposed != 0)

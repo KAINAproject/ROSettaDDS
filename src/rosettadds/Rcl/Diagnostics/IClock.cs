@@ -19,6 +19,8 @@ internal sealed class SystemClock : IClock
         decimal delta = (decimal)endingTimestamp - (decimal)startingTimestamp;
         if (delta <= 0)
             return TimeSpan.Zero;
+        if (delta > long.MaxValue)
+            return TimeSpan.Zero;
         var result = TicksToTimeSpan((long)delta, System.Diagnostics.Stopwatch.Frequency);
         if (result <= TimeSpan.Zero)
             return TimeSpan.Zero;
@@ -32,7 +34,11 @@ internal sealed class SystemClock : IClock
         decimal seconds = (decimal)ticks / frequency;
         if (seconds <= 0)
             return TimeSpan.Zero;
-        long resultTicks = (long)(seconds * TimeSpan.TicksPerSecond);
+        decimal totalTicks = seconds * TimeSpan.TicksPerSecond;
+        if (totalTicks > long.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(ticks),
+                "Resulting TimeSpan exceeds maximum representable value.");
+        long resultTicks = (long)totalTicks;
         if (resultTicks <= 0)
             return TimeSpan.Zero;
         return TimeSpan.FromTicks(resultTicks);

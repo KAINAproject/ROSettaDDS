@@ -1,4 +1,5 @@
 using System.Reflection;
+using ROSettaDDS.Cdr;
 using ROSettaDDS.Common;
 using ROSettaDDS.Common.Logging;
 using ROSettaDDS.Dds;
@@ -276,7 +277,7 @@ public class TopicFrequencyMonitorTests
             {
                 try
                 {
-                    barrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                    barrier.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
                     for (int j = 0; j < 100; j++)
                         reader.SimulatePayload(new byte[] { (byte)j }, default);
                 }
@@ -315,8 +316,8 @@ public class TopicFrequencyMonitorTests
         var raw = new RawSubscription(
             "t", default, reader, (_, _) =>
             {
-                callbackEntered.SignalAndWait(TimeSpan.FromSeconds(5));
-                continueBarrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                callbackEntered.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
+                continueBarrier.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
             }, autoStart: false);
 
         var callbackThread = new Thread(() =>
@@ -333,11 +334,11 @@ public class TopicFrequencyMonitorTests
         callbackThread.Start();
 
         // Wait for callback to enter, then dispose while callback is held
-        callbackEntered.SignalAndWait(TimeSpan.FromSeconds(5));
+        callbackEntered.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
         raw.Dispose();
 
         // Release callback
-        continueBarrier.SignalAndWait(TimeSpan.FromSeconds(5));
+        continueBarrier.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
 
         callbackThread.Join(TimeSpan.FromSeconds(5)).Should().BeTrue("worker must complete within 5s");
 
@@ -707,7 +708,7 @@ public class TopicFrequencyMonitorTests
         {
             try
             {
-                barrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                barrier.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
                 monitor.Dispose();
             }
             catch (Exception ex) { ex1 = ex; }
@@ -716,7 +717,7 @@ public class TopicFrequencyMonitorTests
         {
             try
             {
-                barrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                barrier.SignalAndWait(TimeSpan.FromSeconds(5)).Should().BeTrue();
                 monitor.Dispose();
             }
             catch (Exception ex) { ex2 = ex; }
@@ -1256,32 +1257,162 @@ public class TopicFrequencyMonitorTests
 
         var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(m => !m.IsSpecialName)
-            .GroupBy(m => m.Name)
-            .OrderBy(g => g.Key)
+            .OrderBy(m => m.Name)
+            .ThenBy(m => m.GetParameters().Length)
             .ToArray();
 
-        // Expected: CreatePublisher(2 overloads), CreateServiceClient, CreateSubscription(2 overloads), CreateTopicDiagnostics, Dispose
-        methods.Length.Should().Be(5);
-        methods[0].Key.Should().Be("CreatePublisher");
-        methods[0].Count().Should().Be(2);
-        methods[0].OrderBy(m => m.GetParameters().Length).First().GetParameters().Length.Should().Be(3);
-        methods[0].OrderByDescending(m => m.GetParameters().Length).First().GetParameters().Length.Should().Be(5);
+        methods.Length.Should().Be(7);
 
-        methods[1].Key.Should().Be("CreateServiceClient");
-        methods[1].Count().Should().Be(1);
+        // --- CreatePublisher (3-param overload) ---
+        var pub3 = methods[0];
+        pub3.Name.Should().Be("CreatePublisher");
+        pub3.IsGenericMethod.Should().BeTrue();
+        pub3.GetGenericArguments().Length.Should().Be(1);
+        pub3.ReturnType.GetGenericTypeDefinition().Should().Be(typeof(Publisher<>));
+        var pub3Params = pub3.GetParameters();
+        pub3Params.Length.Should().Be(3);
+        pub3Params[0].Name.Should().Be("topicName");
+        pub3Params[0].ParameterType.Should().Be(typeof(string));
+        pub3Params[0].IsOptional.Should().BeFalse();
+        pub3Params[1].Name.Should().Be("serializer");
+        pub3Params[1].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(ICdrSerializer<>));
+        pub3Params[1].IsOptional.Should().BeFalse();
+        pub3Params[2].Name.Should().Be("typeName");
+        pub3Params[2].ParameterType.Should().Be(typeof(string));
+        pub3Params[2].IsOptional.Should().BeTrue();
+        pub3Params[2].HasDefaultValue.Should().BeTrue();
+        pub3Params[2].DefaultValue.Should().BeNull();
 
-        methods[2].Key.Should().Be("CreateSubscription");
-        methods[2].Count().Should().Be(2);
+        // --- CreatePublisher (5-param overload) ---
+        var pub5 = methods[1];
+        pub5.Name.Should().Be("CreatePublisher");
+        pub5.IsGenericMethod.Should().BeTrue();
+        pub5.GetGenericArguments().Length.Should().Be(1);
+        pub5.ReturnType.GetGenericTypeDefinition().Should().Be(typeof(Publisher<>));
+        var pub5Params = pub5.GetParameters();
+        pub5Params.Length.Should().Be(5);
+        pub5Params[0].Name.Should().Be("topicName");
+        pub5Params[0].ParameterType.Should().Be(typeof(string));
+        pub5Params[1].Name.Should().Be("serializer");
+        pub5Params[1].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(ICdrSerializer<>));
+        pub5Params[2].Name.Should().Be("reliability");
+        pub5Params[2].ParameterType.Should().Be(typeof(ReliabilityQos));
+        pub5Params[3].Name.Should().Be("durability");
+        pub5Params[3].ParameterType.Should().Be(typeof(DurabilityQos));
+        pub5Params[4].Name.Should().Be("typeName");
+        pub5Params[4].ParameterType.Should().Be(typeof(string));
+        pub5Params[4].IsOptional.Should().BeTrue();
+        pub5Params[4].HasDefaultValue.Should().BeTrue();
+        pub5Params[4].DefaultValue.Should().BeNull();
 
-        methods[3].Key.Should().Be("CreateTopicDiagnostics");
-        methods[3].Count().Should().Be(1);
-        methods[3].Single().ReturnType.Should().Be(typeof(TopicDiagnostics));
-        methods[3].Single().GetParameters().Should().BeEmpty();
+        // --- CreateServiceClient ---
+        var sc = methods[2];
+        sc.Name.Should().Be("CreateServiceClient");
+        sc.IsGenericMethod.Should().BeTrue();
+        sc.GetGenericArguments().Length.Should().Be(2);
+        sc.ReturnType.GetGenericTypeDefinition().Should().Be(typeof(ServiceClient<,>));
+        var scParams = sc.GetParameters();
+        scParams.Length.Should().Be(2);
+        scParams[0].Name.Should().Be("descriptor");
+        scParams[0].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(ServiceDescriptor<,>));
+        scParams[0].IsOptional.Should().BeFalse();
+        scParams[1].Name.Should().Be("serviceName");
+        scParams[1].ParameterType.Should().Be(typeof(string));
+        scParams[1].IsOptional.Should().BeFalse();
 
-        methods[4].Key.Should().Be("Dispose");
-        methods[4].Count().Should().Be(1);
-        methods[4].Single().ReturnType.Should().Be(typeof(void));
-        methods[4].Single().GetParameters().Should().BeEmpty();
+        // --- CreateSubscription (Action<T> overload, 5 params) ---
+        var sub5 = methods[3];
+        sub5.Name.Should().Be("CreateSubscription");
+        sub5.IsGenericMethod.Should().BeTrue();
+        sub5.GetGenericArguments().Length.Should().Be(1);
+        sub5.ReturnType.GetGenericTypeDefinition().Should().Be(typeof(Subscription<>));
+        var sub5Params = sub5.GetParameters();
+        sub5Params.Length.Should().Be(5);
+        sub5Params[0].Name.Should().Be("topicName");
+        sub5Params[0].ParameterType.Should().Be(typeof(string));
+        sub5Params[1].Name.Should().Be("serializer");
+        sub5Params[1].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(ICdrSerializer<>));
+        sub5Params[2].Name.Should().Be("handler");
+        sub5Params[2].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(Action<>));
+        sub5Params[3].Name.Should().Be("handlerContext");
+        sub5Params[3].ParameterType.Should().Be(typeof(SynchronizationContext));
+        sub5Params[3].IsOptional.Should().BeTrue();
+        sub5Params[3].HasDefaultValue.Should().BeTrue();
+        sub5Params[3].DefaultValue.Should().BeNull();
+        sub5Params[4].Name.Should().Be("reliability");
+        sub5Params[4].ParameterType.Should().Be(typeof(ReliabilityQos?));
+        sub5Params[4].IsOptional.Should().BeTrue();
+        sub5Params[4].HasDefaultValue.Should().BeTrue();
+        sub5Params[4].DefaultValue.Should().BeNull();
+
+        // --- CreateSubscription (Action<T,GuidPrefix> overload, 6 params) ---
+        var sub6 = methods[4];
+        sub6.Name.Should().Be("CreateSubscription");
+        sub6.IsGenericMethod.Should().BeTrue();
+        sub6.GetGenericArguments().Length.Should().Be(1);
+        sub6.ReturnType.GetGenericTypeDefinition().Should().Be(typeof(Subscription<>));
+        var sub6Params = sub6.GetParameters();
+        sub6Params.Length.Should().Be(6);
+        sub6Params[0].Name.Should().Be("topicName");
+        sub6Params[0].ParameterType.Should().Be(typeof(string));
+        sub6Params[1].Name.Should().Be("serializer");
+        sub6Params[1].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(ICdrSerializer<>));
+        sub6Params[2].Name.Should().Be("handler");
+        sub6Params[2].ParameterType.GetGenericTypeDefinition().Should().Be(typeof(Action<,>));
+        sub6Params[3].Name.Should().Be("typeName");
+        sub6Params[3].ParameterType.Should().Be(typeof(string));
+        sub6Params[3].IsOptional.Should().BeTrue();
+        sub6Params[3].HasDefaultValue.Should().BeTrue();
+        sub6Params[3].DefaultValue.Should().BeNull();
+        sub6Params[4].Name.Should().Be("handlerContext");
+        sub6Params[4].ParameterType.Should().Be(typeof(SynchronizationContext));
+        sub6Params[4].IsOptional.Should().BeTrue();
+        sub6Params[4].HasDefaultValue.Should().BeTrue();
+        sub6Params[4].DefaultValue.Should().BeNull();
+        sub6Params[5].Name.Should().Be("reliability");
+        sub6Params[5].ParameterType.Should().Be(typeof(ReliabilityQos?));
+        sub6Params[5].IsOptional.Should().BeTrue();
+        sub6Params[5].HasDefaultValue.Should().BeTrue();
+        sub6Params[5].DefaultValue.Should().BeNull();
+
+        // --- CreateTopicDiagnostics ---
+        var ctd = methods[5];
+        ctd.Name.Should().Be("CreateTopicDiagnostics");
+        ctd.IsGenericMethod.Should().BeFalse();
+        ctd.ReturnType.Should().Be(typeof(TopicDiagnostics));
+        ctd.GetParameters().Should().BeEmpty();
+
+        // --- Dispose ---
+        var disp = methods[6];
+        disp.Name.Should().Be("Dispose");
+        disp.IsGenericMethod.Should().BeFalse();
+        disp.ReturnType.Should().Be(typeof(void));
+        disp.GetParameters().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TopicDiagnostics_GetTopicInfo_nullableReturn()
+    {
+        var method = typeof(TopicDiagnostics).GetMethods(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .First(m => m.Name == "GetTopicInfo");
+        method.ReturnType.Should().Be(typeof(TopicInfo));
+        method.ReturnParameter.IsOptional.Should().BeFalse();
+        var nullableAttr = method.ReturnParameter.GetCustomAttributes(false)
+            .FirstOrDefault(a => a.GetType().Name == "NullableAttribute");
+        nullableAttr.Should().NotBeNull("GetTopicInfo returns nullable TopicInfo?");
+    }
+
+    [Fact]
+    public void TopicDiagnostics_GetTopics_nonNullReturn()
+    {
+        var method = typeof(TopicDiagnostics).GetMethods(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .First(m => m.Name == "GetTopics");
+        method.ReturnType.Should().Be(typeof(IReadOnlyList<TopicInfo>));
+        var nullableAttr = method.ReturnParameter.GetCustomAttributes(false)
+            .FirstOrDefault(a => a.GetType().Name == "NullableAttribute");
+        nullableAttr.Should().BeNull("GetTopics returns non-nullable IReadOnlyList<TopicInfo>");
     }
 
     [Fact]
@@ -1414,6 +1545,41 @@ public class TopicFrequencyMonitorTests
     {
         var clock = SystemClock.Instance;
         clock.GetElapsedTime(0, long.MinValue).Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void TicksToTimeSpan_overflowでArgumentOutOfRange()
+    {
+        // long.MaxValue ticks at 1 Hz → totalTicks = long.MaxValue * TicksPerSecond >> long.MaxValue → overflow
+        var act = () => SystemClock.TicksToTimeSpan(long.MaxValue, 1);
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void TicksToTimeSpan_TimeSpanMax境界()
+    {
+        // frequency = TicksPerSecond → totalTicks = long.MaxValue (independently verified as TimeSpan.MaxValue.Ticks)
+        var result = SystemClock.TicksToTimeSpan(long.MaxValue, TimeSpan.TicksPerSecond);
+        result.Ticks.Should().Be(TimeSpan.MaxValue.Ticks);
+        result.Should().Be(TimeSpan.MaxValue);
+    }
+
+    [Fact]
+    public void TicksToTimeSpan_TimeSpanMax超過でArgumentOutOfRange()
+    {
+        // one tick more than max: totalTicks > long.MaxValue → throws
+        // At frequency=1: ticks = long.MaxValue already overflows, test that directly
+        // At frequency=TicksPerSecond/2: ticks = long.MaxValue → totalTicks = long.MaxValue * 2 > long.MaxValue
+        var act = () => SystemClock.TicksToTimeSpan(long.MaxValue, TimeSpan.TicksPerSecond / 2);
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public void GetElapsedTime_delta超過longMaxでZero()
+    {
+        var clock = SystemClock.Instance;
+        // delta = (decimal)long.MaxValue - (decimal)long.MinValue > long.MaxValue → returns Zero
+        clock.GetElapsedTime(long.MinValue, long.MaxValue).Should().Be(TimeSpan.Zero);
     }
 
     [Fact]

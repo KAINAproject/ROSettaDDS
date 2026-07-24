@@ -182,12 +182,12 @@ public class StatefulWriterLifecycleTests
     }
 
     [Fact]
-    public void Heartbeatループ終了を実際にassert()
+    public async Task Heartbeatループ終了を実際にassert()
     {
         var s = CreateSetup();
         using var writer = CreateWriter(s, out _);
 
-        var hbReceived = new ManualResetEventSlim(false);
+        var hbTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         int hbCount = 0;
         s.Transport.Received += (packetData, srcLoc) =>
         {
@@ -197,34 +197,30 @@ public class StatefulWriterLifecycleTests
             {
                 if (subHeader.Kind == SubmessageKind.Heartbeat)
                 {
-                    Interlocked.Increment(ref hbCount);
-                    hbReceived.Set();
+                    if (Interlocked.Increment(ref hbCount) == 1)
+                        hbTcs.TrySetResult();
                 }
             }
         };
 
         writer.Start();
-        hbReceived.Wait(TimeSpan.FromSeconds(5));
+        await hbTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
         int beforeStop = Volatile.Read(ref hbCount);
         beforeStop.Should().BeGreaterThan(0,
             "heartbeats should have been sent before stop");
 
         writer.Stop();
-        int afterStop = Volatile.Read(ref hbCount);
-        // Stop guarantees heartbeat loop completion; no more heartbeats can arrive
-        Volatile.Read(ref hbCount).Should().Be(afterStop,
-            "no heartbeats after stop");
-
+        // Stop 完了 = heartbeat loop 終了 (hbLoop.Wait 済み)
         writer.IsRunning.Should().BeFalse();
     }
 
     [Fact]
-    public void Heartbeatループ再起動後停止を実際にassert()
+    public async Task Heartbeatループ再起動後停止を実際にassert()
     {
         var s = CreateSetup();
         using var writer = CreateWriter(s, out _);
 
-        var hbReceived = new AutoResetEvent(false);
+        var hbTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         int hbCount = 0;
         s.Transport.Received += (packetData, srcLoc) =>
         {
@@ -235,35 +231,29 @@ public class StatefulWriterLifecycleTests
                 if (subHeader.Kind == SubmessageKind.Heartbeat)
                 {
                     Interlocked.Increment(ref hbCount);
-                    hbReceived.Set();
+                    hbTcs.TrySetResult();
                 }
             }
         };
 
         // Start → Stop → Start → Stop のサイクル
         writer.Start();
-        Assert.True(hbReceived.WaitOne(TimeSpan.FromSeconds(5)),
-            "heartbeats should arrive after first start");
+        await hbTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
         int afterFirstHb = Volatile.Read(ref hbCount);
         afterFirstHb.Should().BeGreaterThan(0);
 
         writer.Stop();
-        int afterFirstStop = Volatile.Read(ref hbCount);
-        Volatile.Read(ref hbCount).Should().Be(afterFirstStop,
-            "no heartbeats after first stop");
+        writer.IsRunning.Should().BeFalse();
 
+        // 再起動 — generation が進むことを確認
+        hbTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         writer.Start();
-        Assert.True(hbReceived.WaitOne(TimeSpan.FromSeconds(5)),
-            "heartbeats should arrive after restart");
+        await hbTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
         int beforeSecondStop = Volatile.Read(ref hbCount);
-        beforeSecondStop.Should().BeGreaterThan(afterFirstStop,
-            "heartbeats resume after restart");
+        beforeSecondStop.Should().BeGreaterThan(afterFirstHb,
+            "heartbeats resume after restart (generation increased)");
 
         writer.Stop();
-        int afterSecondStop = Volatile.Read(ref hbCount);
-        Volatile.Read(ref hbCount).Should().Be(afterSecondStop,
-            "no heartbeats after second stop");
-
         writer.IsRunning.Should().BeFalse();
     }
 
@@ -279,12 +269,11 @@ public class StatefulWriterLifecycleTests
     }
 
     [Fact]
-    public async Task Stop後にACKNACKが届いてもRunBackgroundが開始されない()
+    public async Task Stop後にACKNACKが届いてもRunBackgroundはキャンセルトークンで即完了する()
     {
         var s = CreateSetup();
         using var writer = CreateWriter(s, out var history);
 
-        // Write data and match a reader so ACKNACK can be processed
         var readerGuid = new Guid(s.Prefix, new EntityId(0x0000_0002u, EntityKind.UserDefinedReaderNoKey));
         writer.MatchReader(readerGuid);
         await writer.WriteAsync(new byte[] { 1, 2, 3 });
@@ -292,24 +281,24 @@ public class StatefulWriterLifecycleTests
         writer.Start();
         writer.Stop();
 
-        // After Stop, send an ACKNACK → OnAckNack → RunBackground should be skipped
+        // After Stop, CTS は cancelled 状態だが _disposed=false.
+        // RunBackground は lock 下で _disposed を確認 → false、cancelled token でタスクを起動するが即完了する。
         var ackPacket = BuildAckNackPacket(s.Prefix, readerGuid.EntityId, s.EntityId);
         writer.ProcessPacket(ackPacket);
 
-        // No crash, writer state is correct
         writer.IsRunning.Should().BeFalse();
         history.IsDisposed.Should().BeFalse();
     }
 
     [Fact]
-    public async Task ACKNACK処理とDisposeの競合で全タスク完了後にhistoryが破棄される()
+    public async Task ACKNACK再送bitmapとDisposeの競合で全タスク完了後にhistoryが破棄される()
     {
         var s = CreateSetup();
         var writer = CreateWriter(s, out var history);
 
-        // Write data and match a reader
         var readerGuid = new Guid(s.Prefix, new EntityId(0x0000_0002u, EntityKind.UserDefinedReaderNoKey));
         writer.MatchReader(readerGuid);
+        // SN=1 を書き込み
         await writer.WriteAsync(new byte[] { 1, 2, 3 });
 
         var barrier = new Barrier(2);
@@ -325,10 +314,10 @@ public class StatefulWriterLifecycleTests
         disposeThread.Start();
         barrier.SignalAndWait();
 
-        // Send ACKNACK while Dispose is in progress
-        // Dispose holds the lifecycle lock so OnAckNack→RunBackground is blocked
-        // After Dispose completes, ProcessPacket sees _disposed and skips
-        var ackPacket = BuildAckNackPacket(s.Prefix, readerGuid.EntityId, s.EntityId);
+        // ACKNACK with resend bitmap: SN=1 を要求 → ResendRequestedAsync が実際に resend 開始
+        // Dispose は life cycle lock で直列化され、全 background task 完了後に history を破棄する
+        var ackPacket = BuildAckNackPacket(s.Prefix, readerGuid.EntityId, s.EntityId,
+            new SequenceNumberSet(new SequenceNumber(1L), 1, new[] { 0x80000000u }));
         writer.ProcessPacket(ackPacket);
 
         Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)));
@@ -344,17 +333,16 @@ public class StatefulWriterLifecycleTests
         var s = CreateSetup();
         var writer = CreateWriter(s, out var history);
 
-        // Match reader (doesn't require Start) and write data
         var readerGuid = new Guid(s.Prefix, new EntityId(0x0000_0002u, EntityKind.UserDefinedReaderNoKey));
         writer.MatchReader(readerGuid);
         await writer.WriteAsync(new byte[] { 1, 2, 3 });
 
-        // Trigger ACKNACK processing which calls RunBackground even without Start
-        // (RunBackground checks _started, so with the fix this won't start a task)
-        var ackPacket = BuildAckNackPacket(s.Prefix, readerGuid.EntityId, s.EntityId);
+        // Start せずに ACKNACK 処理 → RunBackground。_disposed=false、CTS=null の状態でタスクが登録される
+        var ackPacket = BuildAckNackPacket(s.Prefix, readerGuid.EntityId, s.EntityId,
+            new SequenceNumberSet(new SequenceNumber(1L), 1, new[] { 0x80000000u }));
         writer.ProcessPacket(ackPacket);
 
-        // Dispose - should not wait forever and should dispose history
+        // Dispose は registration gate を閉じてから全タスク完了を待ち、history を破棄する
         writer.Dispose();
         writer.IsRunning.Should().BeFalse();
         history.IsDisposed.Should().BeTrue();
@@ -366,7 +354,7 @@ public class StatefulWriterLifecycleTests
         var s = CreateSetup();
         using var writer = CreateWriter(s, out _);
 
-        // Use reflection to set resendHistoryOnMatch... 
+        // Use reflection to set resendHistoryOnMatch...
         // Instead, create a writer with resendHistoryOnMatch: true directly
         var writerGuid = new Guid(s.Prefix, s.EntityId);
         var history = new WriterHistoryCache(writerGuid);
@@ -423,12 +411,18 @@ public class StatefulWriterLifecycleTests
 
     private static byte[] BuildAckNackPacket(GuidPrefix readerPrefix, EntityId readerEntityId, EntityId writerEntityId)
     {
+        return BuildAckNackPacket(readerPrefix, readerEntityId, writerEntityId,
+            new SequenceNumberSet(new SequenceNumber(1), 0, Array.Empty<uint>()));
+    }
+
+    private static byte[] BuildAckNackPacket(GuidPrefix readerPrefix, EntityId readerEntityId, EntityId writerEntityId, SequenceNumberSet snSet)
+    {
         var buffer = new byte[256];
         var writer = new RtpsMessageWriter(buffer, ProtocolVersion.V2_4, VendorId.ROSettaDDS, readerPrefix);
         writer.WriteAckNack(new AckNackSubmessage(
             readerEntityId: readerEntityId,
             writerEntityId: writerEntityId,
-            readerSnState: new SequenceNumberSet(new SequenceNumber(1), 0, Array.Empty<uint>()),
+            readerSnState: snSet,
             count: 1,
             final: true));
         return writer.WrittenSpan.ToArray();

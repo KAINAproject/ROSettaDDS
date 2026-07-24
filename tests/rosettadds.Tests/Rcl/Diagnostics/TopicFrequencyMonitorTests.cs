@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Threading;
 using ROSettaDDS.Cdr;
 using ROSettaDDS.Common;
 using ROSettaDDS.Common.Logging;
@@ -1958,26 +1959,34 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
-    public void TopicFrequencyMonitor_並行callbackで負intervalが発生しない()
+    public void TopicFrequencyMonitor_並行OnPayload経路で負intervalが発生しない()
     {
         var clock = new MockClock();
         using var monitor = CreateMonitorWithClock(clock, windowSize: 100);
 
-        // 並行callbackを模擬: RecordCoreと同じ実装経由でOnPayload相当のlock内timestamp取得
-        // 直接Record(long)はテスト用にtimestamp指定可能 → 負intervalを仕込めるがOnPayloadはlock内取得
-        // ここではRecord(long)でマイナス傾向になるケースがないことを確認
-        var threads = new Thread[8];
-        var barrier = new Barrier(threads.Length);
-        for (int i = 0; i < threads.Length; i++)
+        // 実際の OnPayload callback 経路を模擬: RawSubscription 経由で callback を並行発火
+        var reader = new TestUserReader(new EntityId(20, EntityKind.UserDefinedReaderNoKey));
+        using var raw = new RawSubscription(
+            "t", default, reader,
+            (_, _) =>
+            {
+                // Record に clock.Advance の結果を渡すことで timestamp を Record に委譲
+                // (実際の OnPayload と同様に lock 内で処理される)
+                monitor.Record(clock.Advance(1));
+            },
+            autoStart: false);
+
+        const int ThreadCount = 8;
+        const int PayloadsPerThread = 50;
+        var threads = new Thread[ThreadCount];
+        var barrier = new Barrier(ThreadCount);
+        for (int i = 0; i < ThreadCount; i++)
         {
-            int threadIndex = i;
             threads[i] = new Thread(() =>
             {
                 barrier.SignalAndWait();
-                for (int j = 0; j < 50; j++)
-                {
-                    monitor.Record(clock.Advance(1 + (threadIndex % 3)));
-                }
+                for (int j = 0; j < PayloadsPerThread; j++)
+                    reader.SimulatePayload(ReadOnlyMemory<byte>.Empty, default);
             });
         }
 
@@ -1985,12 +1994,13 @@ public class TopicFrequencyMonitorTests
         foreach (var t in threads) t.Join();
 
         var stats = monitor.GetStatistics();
-        if (stats.HasData)
-        {
-            stats.MinInterval.Ticks.Should().BeGreaterOrEqualTo(0);
-            stats.MaxInterval.Ticks.Should().BeGreaterOrEqualTo(0);
-            stats.MeanInterval.Ticks.Should().BeGreaterOrEqualTo(0);
-        }
+        // 400 payloads → ring buffer (window=100) caps at 100
+        stats.HasData.Should().BeTrue("concurrent callbacks must produce valid timestamps");
+        stats.SampleCount.Should().Be(100, "ring buffer caps at WindowSize");
+        stats.MinInterval.Ticks.Should().BeGreaterOrEqualTo(0,
+            "no negative intervals under concurrent OnPayload callbacks");
+        stats.WindowDuration.Should().BeGreaterThan(TimeSpan.Zero,
+            "timestamps span non-zero window");
     }
 
     [Fact]
@@ -2062,7 +2072,7 @@ public class TopicFrequencyMonitorTests
             _now = initialTicks;
         }
 
-        public long GetTimestamp() => _now;
+        public long GetTimestamp() => Volatile.Read(ref _now);
 
         public TimeSpan GetElapsedTime(long startingTimestamp, long endingTimestamp)
         {
@@ -2077,8 +2087,7 @@ public class TopicFrequencyMonitorTests
         /// <summary>Advance clock by given ticks and return new timestamp.</summary>
         public long Advance(long ticks)
         {
-            _now += ticks;
-            return _now;
+            return Interlocked.Add(ref _now, ticks);
         }
     }
 

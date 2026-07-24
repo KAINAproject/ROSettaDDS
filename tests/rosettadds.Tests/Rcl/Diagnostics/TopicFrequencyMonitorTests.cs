@@ -268,6 +268,7 @@ public class TopicFrequencyMonitorTests
             "t", default, reader, (_, _) => Interlocked.Increment(ref callCount), autoStart: false);
 
         var barrier = new Barrier(3);
+        var exceptions = new List<Exception>();
         var threads = new Thread[3];
         for (int i = 0; i < 3; i++)
         {
@@ -275,19 +276,30 @@ public class TopicFrequencyMonitorTests
             {
                 try
                 {
-                    barrier.SignalAndWait();
+                    barrier.SignalAndWait(TimeSpan.FromSeconds(5));
                     for (int j = 0; j < 100; j++)
                         reader.SimulatePayload(new byte[] { (byte)j }, default);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // ignore unhandled exception in raw thread
+                    lock (exceptions) { exceptions.Add(ex); }
                 }
             });
         }
 
         foreach (var t in threads) t.Start();
-        foreach (var t in threads) t.Join();
+        try
+        {
+            foreach (var t in threads)
+                t.Join(TimeSpan.FromSeconds(5)).Should().BeTrue("worker thread must complete within 5s");
+        }
+        finally
+        {
+            barrier.Dispose();
+        }
+
+        if (exceptions.Count > 0)
+            throw new AggregateException("Worker threads threw exceptions", exceptions);
 
         callCount.Should().Be(300);
     }
@@ -299,6 +311,8 @@ public class TopicFrequencyMonitorTests
         var raw = new RawSubscription(
             "t", default, reader, (_, _) => Thread.SpinWait(100), autoStart: false);
 
+        Exception? workerException = null;
+        var signal = new ManualResetEventSlim(false);
         var callbackThread = new Thread(() =>
         {
             try
@@ -306,9 +320,13 @@ public class TopicFrequencyMonitorTests
                 for (int i = 0; i < 50; i++)
                     reader.SimulatePayload(new byte[] { (byte)i }, default);
             }
-            catch
+            catch (Exception ex)
             {
-                // ignore unhandled exception in raw thread
+                workerException = ex;
+            }
+            finally
+            {
+                signal.Set();
             }
         });
         callbackThread.Start();
@@ -316,7 +334,11 @@ public class TopicFrequencyMonitorTests
         Thread.SpinWait(50);
         raw.Dispose();
 
-        callbackThread.Join();
+        callbackThread.Join(TimeSpan.FromSeconds(5)).Should().BeTrue("worker must complete within 5s");
+        signal.Wait(TimeSpan.FromSeconds(1));
+
+        if (workerException is not null)
+            throw new AggregateException("Worker thread threw exception", workerException);
     }
 
     // ======== TopicFrequencyOptions ========
@@ -670,6 +692,49 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
+    public void Disposeの競合をBarrierで同時実行()
+    {
+        var clock = new MockClock();
+        var monitor = CreateMonitorWithClock(clock, windowSize: 10);
+
+        var barrier = new Barrier(2);
+        Exception? ex1 = null, ex2 = null;
+        var t1 = new Thread(() =>
+        {
+            try
+            {
+                barrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                monitor.Dispose();
+            }
+            catch (Exception ex) { ex1 = ex; }
+        });
+        var t2 = new Thread(() =>
+        {
+            try
+            {
+                barrier.SignalAndWait(TimeSpan.FromSeconds(5));
+                monitor.Dispose();
+            }
+            catch (Exception ex) { ex2 = ex; }
+        });
+
+        t1.Start();
+        t2.Start();
+        try
+        {
+            t1.Join(TimeSpan.FromSeconds(5)).Should().BeTrue();
+            t2.Join(TimeSpan.FromSeconds(5)).Should().BeTrue();
+        }
+        finally
+        {
+            barrier.Dispose();
+        }
+
+        if (ex1 is not null) throw new AggregateException("Thread1 threw", ex1);
+        if (ex2 is not null) throw new AggregateException("Thread2 threw", ex2);
+    }
+
+    [Fact]
     public async Task Dispose中のWaitForMatchedAsyncはキャンセルされる()
     {
         var clock = new MockClock();
@@ -994,6 +1059,18 @@ public class TopicFrequencyMonitorTests
         }
         props.Length.Should().Be(expectedProps.Length);
 
+        // Verify init-only setters via IsExternalInit modreq
+        var isExternalInitType = Type.GetType("System.Runtime.CompilerServices.IsExternalInit");
+        isExternalInitType.Should().NotBeNull();
+        foreach (var prop in props)
+        {
+            var setMethod = prop.SetMethod;
+            setMethod.Should().NotBeNull("property " + prop.Name + " must have a setter");
+            var modifiers = setMethod!.ReturnParameter.GetRequiredCustomModifiers();
+            modifiers.Should().Contain(isExternalInitType!,
+                "property " + prop.Name + " setter must be init-only");
+        }
+
         var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
             .Where(m => !m.IsSpecialName).ToArray();
         methods.Should().BeEmpty();
@@ -1127,6 +1204,28 @@ public class TopicFrequencyMonitorTests
         typeof(RawSubscription).IsVisible.Should().BeFalse();
     }
 
+    [Fact]
+    public void Node_CreateTopicDiagnostics_公開シグネチャ()
+    {
+        var method = typeof(Node).GetMethods(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .First(m => m.Name == "CreateTopicDiagnostics");
+        method.ReturnType.Should().Be(typeof(TopicDiagnostics));
+        method.GetParameters().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TopicDiagnostics_CreateFrequencyMonitor_nullableOptionalDefault()
+    {
+        var method = typeof(TopicDiagnostics).GetMethods(
+            BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
+            .First(m => m.Name == "CreateFrequencyMonitor");
+        var optionsParam = method.GetParameters().First(p => p.Name == "options");
+        optionsParam.IsOptional.Should().BeTrue();
+        optionsParam.HasDefaultValue.Should().BeTrue();
+        optionsParam.DefaultValue.Should().BeNull();
+    }
+
     // ======== Spec Review: IClock precision (concrete value assertions) ========
 
     [Fact]
@@ -1188,6 +1287,30 @@ public class TopicFrequencyMonitorTests
     {
         var clock = SystemClock.Instance;
         clock.GetElapsedTime(long.MaxValue - 5, long.MinValue + 5).Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public void SystemClock_GetElapsedTime_longMax近傍でdouble退行しない()
+    {
+        var clock = SystemClock.Instance;
+        long start = long.MaxValue - 100_000;
+        long end = long.MaxValue;
+        var elapsed = clock.GetElapsedTime(start, end);
+
+        // decimal-based calculation (same as production SystemClock)
+        decimal delta = (decimal)end - (decimal)start;
+        decimal seconds = delta / System.Diagnostics.Stopwatch.Frequency;
+        var expected = TimeSpan.FromTicks((long)(seconds * TimeSpan.TicksPerSecond));
+
+        elapsed.Should().NotBe(TimeSpan.Zero, "double precision loss would return Zero");
+        elapsed.Should().Be(expected);
+    }
+
+    [Fact]
+    public void SystemClock_GetElapsedTime_longMinEndでTimeSpanZero()
+    {
+        var clock = SystemClock.Instance;
+        clock.GetElapsedTime(0, long.MinValue).Should().Be(TimeSpan.Zero);
     }
 
     [Fact]
@@ -1263,21 +1386,22 @@ public class TopicFrequencyMonitorTests
     }
 
     [Fact]
-    public async Task WaitForMatchedAsync_fakeDeadline後にfalse()
+    public async Task WaitForMatchedAsync_fakeDeadline前後で動作する()
     {
         var clock = new MockClock();
-        clock.Advance(10_000_000); // start at +1s
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
         var waitTask = monitor.WaitForMatchedAsync(1, TimeSpan.FromMilliseconds(100));
 
-        await Task.Delay(30);
-        waitTask.IsCompleted.Should().BeFalse("clock hasn't advanced past deadline yet");
+        // deadline前: clock within deadline (99ms < 100ms)
+        clock.Advance(990_000);
+        await Task.Delay(10);
+        waitTask.IsCompleted.Should().BeFalse("deadline内なので待機中");
 
-        clock.Advance(5_000_000); // +500ms → elapsed from start = 1.5s > 100ms
-
-        var completed = await waitTask.WaitAsync(TimeSpan.FromSeconds(5));
-        completed.Should().BeFalse();
+        // deadline後: clock past deadline (+110ms > 100ms)
+        clock.Advance(110_000);
+        var completed = await waitTask;
+        completed.Should().BeFalse("deadline超過でタイムアウト");
     }
 
     [Fact]
@@ -1287,9 +1411,12 @@ public class TopicFrequencyMonitorTests
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
         var task = monitor.WaitForMatchedAsync(1, TimeSpan.MaxValue);
-        await Task.Delay(30);
-        // Should still be waiting because TimeSpan.MaxValue is treated as Infinite
-        task.IsCompleted.Should().BeFalse();
+
+        // Advance clock far past any reasonable deadline → should NOT time out
+        clock.Advance(long.MaxValue / 2);
+        await Task.Delay(10);
+
+        task.IsCompleted.Should().BeFalse("TimeSpan.MaxValueは無限期待機");
 
         monitor.Dispose();
         var ex = await Record.ExceptionAsync(() => task);
@@ -1303,8 +1430,11 @@ public class TopicFrequencyMonitorTests
         using var monitor = CreateMonitorWithClock(clock, windowSize: 10);
 
         var task = monitor.WaitForMatchedAsync(1, System.Threading.Timeout.InfiniteTimeSpan);
-        await Task.Delay(30);
-        task.IsCompleted.Should().BeFalse();
+
+        clock.Advance(long.MaxValue / 2);
+        await Task.Delay(10);
+
+        task.IsCompleted.Should().BeFalse("InfiniteTimeSpanは無限期待機");
 
         monitor.Dispose();
         var ex = await Record.ExceptionAsync(() => task);

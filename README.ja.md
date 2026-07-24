@@ -162,9 +162,12 @@ dotnet run --project tools/rosettadds-genmsg -- --input msgs --output src/rosett
 
 `TopicDiagnostics` を使うと、Discovery から収集した Topic 一覧 (`GetTopics`)、
 特定 Topic の詳細 (`GetTopicInfo`)、およびメッセージ到達レートの監視 (`CreateFrequencyMonitor`)
-が行えます。いずれも `Context.Start()` が呼ばれた後でなければ使えません。
+が行えます。`Context.Start()` は外部 discovery および DDS 通信を開始するために必要です。
+`GetTopics` / `GetTopicInfo` はローカル snapshot を返すため `Start()` 前でも呼べますが、
+`CreateFrequencyMonitor` が内部で subscriber を作成するには `Start()` が必要です。
 
 ```csharp
+using ROSettaDDS.Rcl;
 using ROSettaDDS.Rcl.Diagnostics;
 
 using var context = new Context(new ContextOptions
@@ -205,7 +208,8 @@ if (await monitor.WaitForMatchedAsync(minCount: 1, TimeSpan.FromSeconds(5)))
 > `CreateFrequencyMonitor` は内部で **RawSubscription (subscriber)** を作成するため、
 > 監視対象 topic の一時的な subscriber 数が 1 増えます。また `TopicDiagnostics` を
 > `Dispose` すると配下の全 `TopicFrequencyMonitor` も解放されます。
-> `TopicDiagnostics` は必ず `Node` より先に dispose してください。
+> `Node` が `TopicDiagnostics` を追跡して自動的に `Dispose` するため、明示的な
+> `Dispose` は必須ではなく推奨です。
 
 ## QoS を指定する
 

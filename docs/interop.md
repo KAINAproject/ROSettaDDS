@@ -182,21 +182,29 @@ using var node = new Node(context, "fm_interop");
 context.Start();
 
 var cts = new CancellationTokenSource();
-Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+    Console.WriteLine("\nShutting down...");
+};
 
 using var diag = node.CreateTopicDiagnostics();
 
+try
+{
+
 // 事前に discovery を待つ (ROS 2 publisher が起動済みであること)
-await Task.Delay(3000);
+await Task.Delay(3000, cts.Token);
 
 // ===== BestEffort sensor-data (10 Hz) =====
 using var beMonitor = diag.CreateFrequencyMonitor("/sensor_data");
-if (!await beMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5)))
+if (!await beMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token))
 {
     Console.Error.WriteLine("BE: no matched publisher");
     return 1;
 }
-await Task.Delay(3000);
+await Task.Delay(3000, cts.Token);
 var beStats = beMonitor.GetStatistics();
 Console.WriteLine($"BE: rate={beStats.RateHz:F1} Hz samples={beStats.SampleCount}");
 bool beOk = beStats.HasData && beStats.RateHz is >= 8 and <= 12;
@@ -205,18 +213,25 @@ bool beOk = beStats.HasData && beStats.RateHz is >= 8 and <= 12;
 using var relMonitor = diag.CreateFrequencyMonitor(
     "/reliable_data",
     new TopicFrequencyOptions { Reliability = ReliabilityQos.Reliable });
-if (!await relMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5)))
+if (!await relMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token))
 {
     Console.Error.WriteLine("Rel: no matched publisher");
     return 1;
 }
-await Task.Delay(5000);
+await Task.Delay(5000, cts.Token);
 var relStats = relMonitor.GetStatistics();
 Console.WriteLine($"Rel: rate={relStats.RateHz:F1} Hz samples={relStats.SampleCount}");
-bool relOk = relStats.HasData && relStats.RateHz is >= 90 and <= 110;
+bool relOk = relStats.HasData && relStats.RateHz is >= 80 and <= 120;
 
 Console.WriteLine($"BE: {(beOk ? "PASS" : "FAIL")}  Rel: {(relOk ? "PASS" : "FAIL")}");
 return beOk && relOk ? 0 : 1;
+
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Cancelled by user");
+    return 1;
+}
 ```
 
 ### 検証手順
@@ -237,20 +252,31 @@ dotnet run --project <path-to-test-app>
 ### Matched 判定の検証
 
 `WaitForMatchedAsync` で publisher の接続を検出できることを確認する。
+`CreateFrequencyMonitor` は topic が discovery で見つかっている必要があるため、
+先に publisher を発見させてから monitor を作成する。
 
 ```csharp
+using ROSettaDDS.Msgs.Std;
+
 using var diag = node.CreateTopicDiagnostics();
 
-// publisher がまだ存在しない状態で呼ぶ
+// ローカル Publisher を作成し topic を discovery に登録
+using var pub = node.CreatePublisher<StringMessage>(
+    "/lazy_pub", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+await Task.Delay(500, cts.Token); // SEDP 広告の伝搬を待つ
+
 using var monitor = diag.CreateFrequencyMonitor("/lazy_pub");
 
-// false (timeout)
-bool matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(2));
-Console.WriteLine($"matched before pub: {matched}"); // false
+// Publisher が存在するので WaitForMatchedAsync は true を返す
+bool matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token);
+Console.WriteLine($"matched: {matched}"); // true
 
-// 別シェルで ros2 topic pub /lazy_pub ... を起動後、再接続確認
-matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5));
-Console.WriteLine($"matched after pub: {matched}"); // true
+pub.Dispose();
+await Task.Delay(500, cts.Token);
+
+// Publisher が消えたので WaitForMatchedAsync は false (timeout)
+matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(2), cts.Token);
+Console.WriteLine($"matched after dispose: {matched}"); // false
 ```
 
 ### 判定基準

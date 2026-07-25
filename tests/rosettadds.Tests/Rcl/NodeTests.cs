@@ -805,10 +805,9 @@ public class NodeTests
 
         var client = node.CreateServiceClient(descriptor, svcName);
 
-        // CallAsync を大量に並行実行しながら Dispose を呼ぶ
         var callTasks = Enumerable.Range(0, 20).Select(_ =>
             client.CallAsync(new StringMessage("test"), TimeSpan.FromMilliseconds(10))
-                .ContinueWith(t => { /* 例外は無視 - race の安全確認のみ */ }));
+                .ContinueWith(t => { }));
 
         var disposeTask = Task.Run(() => client.Dispose());
 
@@ -816,9 +815,7 @@ public class NodeTests
             Task.WhenAll(callTasks).ContinueWith(_ => { }),
             disposeTask);
 
-        // Dispose 後は pending が空
         Assert.Equal(0, client.PendingRequestCount);
-        // Dispose 後の CallAsync は ObjectDisposedException
         await Assert.ThrowsAsync<ObjectDisposedException>(() =>
             client.CallAsync(new StringMessage("after"), TimeSpan.FromMilliseconds(1)));
     }
@@ -1159,7 +1156,6 @@ public class NodeTests
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         return (int)field!.GetValue(node)!;
     }
-
     private sealed class SilentTransport : IRtpsTransport
     {
         public Locator LocalLocator => Locator.FromUdpV4(IPAddress.Loopback, 7411);

@@ -48,6 +48,7 @@ public sealed class StatefulWriter : IDisposable, IRtpsSubmessageHandler
     public EntityId WriterEntityId => _writerEntityId;
     public WriterHistoryCache History => _history;
     public TimeSpan HeartbeatPeriod => _heartbeatPeriod;
+    internal bool IsRunning => _started && !_disposed;
 
     public StatefulWriter(
         IRtpsTransport sendTransport,

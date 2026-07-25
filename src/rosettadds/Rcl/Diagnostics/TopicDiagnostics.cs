@@ -128,6 +128,7 @@ namespace ROSettaDDS.Rcl.Diagnostics
                 _disposeCompletedGate.Set();
             }
         }
+        }
 
         private void ThrowIfDisposed()
         {

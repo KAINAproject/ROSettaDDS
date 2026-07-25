@@ -2094,7 +2094,6 @@ public class TopicFrequencyMonitorTests
             return Interlocked.Add(ref _now, ticks);
         }
     }
-
     private sealed class TestUserReader : IUserReader
     {
         public TestUserReader(EntityId readerEntityId)

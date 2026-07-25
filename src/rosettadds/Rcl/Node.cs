@@ -13,10 +13,6 @@ using Guid = ROSettaDDS.Common.Guid;
 
 namespace ROSettaDDS.Rcl;
 
-/// <summary>
-/// ROS 2 の rcl_node_t (rclcpp::Node) 相当。<see cref="Context"/> を参照し、
-/// Publisher / Subscription / ServiceClient のみを生やす薄いラッパ。
-/// </summary>
 public sealed class Node : IDisposable
 {
     private readonly NodeOptions _options;
@@ -350,7 +346,6 @@ public sealed class Node : IDisposable
         return diag;
     }
 
-    /// <summary>この Node の全 local endpoint metadata を値コピーで返す。</summary>
     internal EndpointDiscoverySnapshot LocalEndpointSnapshot()
     {
         if (_disposed != 0)
@@ -595,6 +590,7 @@ public sealed class Node : IDisposable
             }
             TestEventRecorder?.Invoke("AfterSedpUnregisterWriter");
         }
+        TestEventRecorder?.Invoke("AfterSedpUnregisterWriter");
     }
 
     private void UnregisterLocalReader(Guid endpointGuid, IUserReader readerToRemove)
@@ -618,6 +614,7 @@ public sealed class Node : IDisposable
             }
             TestEventRecorder?.Invoke("AfterSedpUnregisterReader");
         }
+        TestEventRecorder?.Invoke("AfterSedpUnregisterReader");
     }
 
     private void OnRemoteReaderDiscovered(RemoteEndpoint remoteReader)

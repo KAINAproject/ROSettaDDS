@@ -1150,12 +1150,81 @@ public class NodeTests
         }
     }
 
+    // ======== Fix 2: Dispose cleanup continuation ========
+
+    [Fact]
+    public void Disposeで先頭wrapper例外でも後続wrapperが処理される()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "cleanup_test");
+
+        using var pub1 = node.CreatePublisher<StringMessage>(
+            "topic1", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var pub2 = node.CreatePublisher<StringMessage>(
+            "topic2", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+
+        var wrappersField = typeof(Node).GetField("_trackedWrappers",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var wrappers = (List<IDisposable>)wrappersField.GetValue(node)!;
+        wrappers.Insert(0, new ThrowingDisposable());
+        int originalCount = wrappers.Count;
+
+        Exception? disposeEx = null;
+        try { node.Dispose(); }
+        catch (Exception ex) { disposeEx = ex; }
+
+        Assert.NotNull(disposeEx);
+        Assert.IsType<InvalidOperationException>(disposeEx);
+        Assert.True(node.IsDisposed);
+
+        var remaining = (List<IDisposable>)wrappersField.GetValue(node)!;
+        Assert.Empty(remaining);
+    }
+
+    // ======== Fix 3: ServiceClient lifecycle ========
+
+    [Fact]
+    public async Task ServiceClient_Dispose後にObjectDisposedException()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        using var node = new Node(ctx, "svc_lifecycle");
+
+        var svcName = $"test_{System.Guid.NewGuid():N}";
+        var descriptor = new ServiceDescriptor<StringMessage, StringMessage>(
+            requestDdsTypeName: StringMessage.DdsTypeName,
+            responseDdsTypeName: StringMessage.DdsTypeName,
+            requestSerializer: StringMessageSerializer.Instance,
+            responseSerializer: StringMessageSerializer.Instance);
+
+        var client = node.CreateServiceClient(descriptor, svcName);
+
+        var cts = new CancellationTokenSource();
+        var waitTask = client.WaitForServiceAsync(TimeSpan.FromSeconds(10), cts.Token);
+
+        await Task.Delay(50);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitTask);
+
+        client.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            client.CallAsync(new StringMessage("after"), TimeSpan.FromMilliseconds(1)));
+    }
+
     private static int GetPendingRegistrationsField(Node node)
     {
         var field = typeof(Node).GetField("_pendingRegistrations",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         return (int)field!.GetValue(node)!;
     }
+
+    private sealed class ThrowingDisposable : IDisposable
+    {
+        public void Dispose() => throw new InvalidOperationException("test throw");
+    }
+
     private sealed class SilentTransport : IRtpsTransport
     {
         public Locator LocalLocator => Locator.FromUdpV4(IPAddress.Loopback, 7411);

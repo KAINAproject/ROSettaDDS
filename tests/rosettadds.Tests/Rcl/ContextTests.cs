@@ -9,6 +9,7 @@ using ROSettaDDS.Transport;
 using Guid = ROSettaDDS.Common.Guid;
 using Xunit;
 using ROSettaDDS.Rcl.Naming;
+using System.Runtime.ExceptionServices;
 
 namespace ROSettaDDS.Tests.Rcl;
 
@@ -233,5 +234,86 @@ public class ContextTests
                 SubscriberCount--;
             }
         }
+    }
+
+    // ======== Fix 1: RegisterNode/Dispose barrier ========
+
+    [Fact]
+    public void Dispose開始後にRegisterNodeがObjectDisposedException()
+    {
+        var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var blocker = new Node(ctx, "blocker");
+
+        var phase1Done = new ManualResetEventSlim();
+        var resumeCreate = new ManualResetEventSlim();
+        blocker.BeforeDisposedCheckCallback = () =>
+        {
+            phase1Done.Set();
+            resumeCreate.Wait();
+        };
+
+        var createThread = new Thread(() =>
+        {
+            try { blocker.CreatePublisher<StringMessage>("topic", StringMessageSerializer.Instance); }
+            catch { }
+        });
+        createThread.Start();
+        Assert.True(phase1Done.Wait(TimeSpan.FromSeconds(5)));
+
+        var disposeThread = new Thread(() => ctx.Dispose());
+        disposeThread.Start();
+
+        Exception? registerError = null;
+        var lateNodeThread = new Thread(() =>
+        {
+            try { _ = new Node(ctx, "late"); }
+            catch (Exception ex) { registerError = ex; }
+        });
+        lateNodeThread.Start();
+
+        try
+        {
+            Assert.True(lateNodeThread.Join(TimeSpan.FromSeconds(2)),
+                "RegisterNode must not deadlock with Dispose (main bug: _nodesLock ordering).");
+            Assert.NotNull(registerError);
+            Assert.IsType<ObjectDisposedException>(registerError);
+        }
+        finally
+        {
+            resumeCreate.Set();
+            Assert.True(createThread.Join(TimeSpan.FromSeconds(5)));
+            Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)));
+        }
+        Assert.True(ctx.IsDisposed);
+    }
+
+    [Fact]
+    public void 並行Context_Disposeで二回目が一回目の完了を待つ()
+    {
+        var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+
+        var barrier = new Barrier(3);
+        var disposals = new Thread[2];
+
+        for (int i = 0; i < 2; i++)
+        {
+            disposals[i] = new Thread(() =>
+            {
+                barrier.SignalAndWait();
+                ctx.Dispose();
+            });
+            disposals[i].Start();
+        }
+
+        barrier.SignalAndWait();
+
+        foreach (var t in disposals)
+        {
+            Assert.True(t.Join(TimeSpan.FromSeconds(5)),
+                "Dispose thread must complete");
+        }
+
+        Assert.True(ctx.IsDisposed);
     }
 }

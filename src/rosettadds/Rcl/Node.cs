@@ -511,14 +511,22 @@ public sealed class Node : IDisposable
             TestEventRecorder?.Invoke("NodeDisposeDiagnosticsStart");
             TopicDiagnostics[] diagnostics;
             lock (_diagnosticsLock) diagnostics = _trackedDiagnostics.ToArray();
-            foreach (var d in diagnostics) d.Dispose();
+            foreach (var d in diagnostics)
+            {
+                try { d.Dispose(); }
+                catch (Exception ex) { _disposeException ??= ex; }
+            }
             lock (_diagnosticsLock) _trackedDiagnostics.Clear();
             TestEventRecorder?.Invoke("NodeDisposeDiagnosticsEnd");
 
             TestEventRecorder?.Invoke("NodeDisposeWrappersStart");
             IDisposable[] wrappers;
             lock (_wrappersLock) wrappers = _trackedWrappers.ToArray();
-            foreach (var w in wrappers) w.Dispose();
+            foreach (var w in wrappers)
+            {
+                try { w.Dispose(); }
+                catch (Exception ex) { _disposeException ??= ex; }
+            }
             lock (_wrappersLock) _trackedWrappers.Clear();
             TestEventRecorder?.Invoke("NodeDisposeWrappersEnd");
 
@@ -529,20 +537,28 @@ public sealed class Node : IDisposable
             }
             TestEventRecorder?.Invoke("NodeDisposeEndpointsEnd");
 
-            if (_discovery is not null)
+            try
             {
-                _discovery.ReaderDiscovered -= OnRemoteReaderDiscovered;
-                _discovery.WriterDiscovered -= OnRemoteWriterDiscovered;
-                _discovery.EndpointUpdated -= OnRemoteEndpointUpdated;
-                _discovery.ReaderLost -= OnRemoteReaderLost;
-                _discovery.WriterLost -= OnRemoteWriterLost;
+                if (_discovery is not null)
+                {
+                    _discovery.ReaderDiscovered -= OnRemoteReaderDiscovered;
+                    _discovery.WriterDiscovered -= OnRemoteWriterDiscovered;
+                    _discovery.EndpointUpdated -= OnRemoteEndpointUpdated;
+                    _discovery.ReaderLost -= OnRemoteReaderLost;
+                    _discovery.WriterLost -= OnRemoteWriterLost;
+                }
             }
+            catch (Exception ex) { _disposeException ??= ex; }
 
-            Context.UnregisterNode(this);
+            try { Context.UnregisterNode(this); }
+            catch (Exception ex) { _disposeException ??= ex; }
+
+            if (_disposeException is not null)
+                throw _disposeException;
         }
         catch (Exception ex)
         {
-            _disposeException = ex;
+            _disposeException ??= ex;
             throw;
         }
         finally
@@ -556,16 +572,24 @@ public sealed class Node : IDisposable
         var endpoints = _userEndpoints.Snapshot();
         foreach (var writer in endpoints.Writers)
         {
-            writer.Stop();
-            UnregisterLocalWriter(writer.Guid, writer);
-            writer.Dispose();
+            try
+            {
+                writer.Stop();
+                UnregisterLocalWriter(writer.Guid, writer);
+                writer.Dispose();
+            }
+            catch (Exception ex) { _disposeException ??= ex; }
         }
         foreach (var reader in endpoints.Readers)
         {
-            var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
-            reader.Stop();
-            UnregisterLocalReader(readerGuid, reader);
-            reader.Dispose();
+            try
+            {
+                var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
+                reader.Stop();
+                UnregisterLocalReader(readerGuid, reader);
+                reader.Dispose();
+            }
+            catch (Exception ex) { _disposeException ??= ex; }
         }
     }
 

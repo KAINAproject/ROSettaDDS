@@ -102,6 +102,17 @@ internal sealed class EndpointRegistry
         }
     }
 
+    /// <summary>現在の全 local endpoint metadata を値コピーで返す。</summary>
+    internal EndpointDiscoverySnapshot LocalEndpointSnapshot()
+    {
+        lock (_lock)
+        {
+            return new EndpointDiscoverySnapshot(
+                _writers.Select(static w => w.Clone()).ToArray(),
+                _readers.Select(static r => r.Clone()).ToArray());
+        }
+    }
+
     public EndpointDiscoverySnapshot UpdateLocalLocators(
         IReadOnlyList<Locator> unicastLocators,
         Locator multicastLocator)

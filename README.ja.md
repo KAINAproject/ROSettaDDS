@@ -158,6 +158,62 @@ dotnet run --project tools/rosettadds-genmsg -- --input msgs --output src/rosett
 > [!NOTE]
 > 文法サポート範囲・命名ポリシー・各環境の使い方は [docs/msg-codegen.md](docs/msg-codegen.md) を参照してください。
 
+## Topic の診断・周波数監視
+
+`TopicDiagnostics` を使うと、Discovery から収集した Topic 一覧 (`GetTopics`)、
+特定 Topic の詳細 (`GetTopicInfo`)、およびメッセージ到達レートの監視 (`CreateFrequencyMonitor`)
+が行えます。`Context.Start()` は外部 discovery および DDS 通信を開始するために必要です。
+Subscriber のローカルオブジェクト作成自体は `Start()` 前でも可能ですが、外部からの
+データ受信や publisher とのマッチには `Start()` が必要です。
+`GetTopics` / `GetTopicInfo` はローカル snapshot を返すため `Start()` 前でも呼べます。
+`CreateFrequencyMonitor` の作成自体は `Start()` 前でも可能です。ただし外部 topic の
+発見・マッチ・受信には `Start()` が必要です。
+
+```csharp
+using ROSettaDDS.Rcl;
+using ROSettaDDS.Rcl.Diagnostics;
+
+using var context = new Context(new ContextOptions
+{
+    DomainId = 0,
+    EntityName = "rosettadds_diag",
+});
+context.Start();
+
+using var node = new Node(context, "rosettadds_diag");
+
+// 全 topic の一覧
+using var diag = node.CreateTopicDiagnostics();
+var topics = diag.GetTopics();
+foreach (var t in topics)
+    Console.WriteLine($"{t.TopicName}: pub={t.PublisherCount} sub={t.SubscriberCount}");
+
+// 特定 topic の情報
+var info = diag.GetTopicInfo("/chatter");
+if (info is not null)
+    Console.WriteLine($"type={string.Join(",", info.RosTypeNames)}");
+
+// 周波数監視 (Best Effort reader を内部で作成)
+using var monitor = diag.CreateFrequencyMonitor(
+    "/chatter",
+    new TopicFrequencyOptions { WindowSize = 1000 });
+
+// publisher が接続するのを待つ
+if (await monitor.WaitForMatchedAsync(minCount: 1, TimeSpan.FromSeconds(5)))
+{
+    await Task.Delay(3000); // サンプルを蓄積
+    var stats = monitor.GetStatistics();
+    Console.WriteLine($"{stats.RateHz:F1} Hz (samples={stats.SampleCount})");
+}
+```
+
+> [!NOTE]
+> `CreateFrequencyMonitor` は内部で **RawSubscription (subscriber)** を作成するため、
+> 監視対象 topic の一時的な subscriber 数が 1 増えます。また `TopicDiagnostics` を
+> `Dispose` すると配下の全 `TopicFrequencyMonitor` も解放されます。
+> `Node` が `TopicDiagnostics` を追跡して自動的に `Dispose` するため、明示的な
+> `Dispose` は必須ではなく推奨です。
+
 ## QoS を指定する
 
 `Node.CreatePublisher` は既定で Reliable publisher を作ります。ROS 2 の sensor-data 相当の

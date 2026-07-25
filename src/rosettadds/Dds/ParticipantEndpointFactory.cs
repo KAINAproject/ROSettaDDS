@@ -99,6 +99,32 @@ internal sealed class ParticipantEndpointFactory
         return new ReaderEndpoint(reader, endpointGuid, endpointData);
     }
 
+    public ReaderEndpoint CreateRawReader(
+        string ddsTopic,
+        string ddsTypeName,
+        ReliabilityQos reliability,
+        DurabilityQos durability)
+    {
+        if (string.IsNullOrEmpty(ddsTopic)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTopic));
+        if (string.IsNullOrEmpty(ddsTypeName)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTypeName));
+
+        var readerEntityId = _entityIds.AllocateReader();
+        var endpointGuid = new Guid(_guidPrefix, readerEntityId);
+        IUserReader reader = reliability.Kind == ReliabilityKind.Reliable
+            ? CreateReliableReader(readerEntityId)
+            : new BestEffortUserReader(_guidPrefix, readerEntityId, _logger, _options.DataFragReassembly);
+
+        var endpointData = CreateEndpointData(
+            EndpointKind.Reader,
+            endpointGuid,
+            ddsTopic,
+            ddsTypeName,
+            reliability,
+            durability);
+
+        return new ReaderEndpoint(reader, endpointGuid, endpointData);
+    }
+
     public ReliableReaderEndpoint CreateReliableReplyReader(string ddsTopic, string ddsTypeName)
     {
         if (string.IsNullOrEmpty(ddsTopic)) throw new ArgumentException("Value cannot be null or empty.", nameof(ddsTopic));

@@ -155,6 +155,147 @@ dotnet run --project tools/rosettadds-perf-runner -- \
 Player log、helper stdout/stderr log。いずれかの scenario が失敗した場合 runner は
 非 0 で終了するが、成功/失敗の内訳と生成済み artifact は `manifest.json` に残る。
 
+## FrequencyMonitor の相互運用確認
+
+ROS 2 (Fast DDS) publisher に対して rosettadds の `TopicFrequencyMonitor` で
+メッセージレートを計測できることを確認する。検証は ROS 2 CLI (`ros2 topic pub`) が
+使える環境で実行し、初回 publish 前に discovery を待つため最初の数秒の欠損は許容する。
+
+### 検証用コード
+
+以下のコード片をコンソールアプリケーションとして実行する。
+(ROSettaDDS への参照が必要。詳細は README.ja.md の「クイックスタート」を参照。)
+
+```csharp
+using ROSettaDDS.Dds.QoS;
+using ROSettaDDS.Rcl;
+using ROSettaDDS.Rcl.Diagnostics;
+
+var options = new ContextOptions
+{
+    DomainId = 0,
+    EntityName = "fm_interop",
+    LocalhostOnly = true,
+};
+using var context = new Context(options);
+using var node = new Node(context, "fm_interop");
+context.Start();
+
+var cts = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cts.Cancel();
+    Console.WriteLine("\nShutting down...");
+};
+
+using var diag = node.CreateTopicDiagnostics();
+
+try
+{
+
+// 事前に discovery を待つ (ROS 2 publisher が起動済みであること)
+await Task.Delay(3000, cts.Token);
+
+// ===== BestEffort sensor-data (10 Hz) =====
+using var beMonitor = diag.CreateFrequencyMonitor("/sensor_data");
+if (!await beMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token))
+{
+    Console.Error.WriteLine("BE: no matched publisher");
+    return 1;
+}
+await Task.Delay(3000, cts.Token);
+var beStats = beMonitor.GetStatistics();
+Console.WriteLine($"BE: rate={beStats.RateHz:F1} Hz samples={beStats.SampleCount}");
+bool beOk = beStats.HasData && beStats.RateHz is >= 8 and <= 12;
+
+// ===== Reliable (100 Hz) =====
+using var relMonitor = diag.CreateFrequencyMonitor(
+    "/reliable_data",
+    new TopicFrequencyOptions { Reliability = ReliabilityQos.Reliable });
+if (!await relMonitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token))
+{
+    Console.Error.WriteLine("Rel: no matched publisher");
+    return 1;
+}
+await Task.Delay(5000, cts.Token);
+var relStats = relMonitor.GetStatistics();
+Console.WriteLine($"Rel: rate={relStats.RateHz:F1} Hz samples={relStats.SampleCount}");
+bool relOk = relStats.HasData && relStats.RateHz is >= 80 and <= 120;
+
+Console.WriteLine($"BE: {(beOk ? "PASS" : "FAIL")}  Rel: {(relOk ? "PASS" : "FAIL")}");
+return beOk && relOk ? 0 : 1;
+
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Cancelled by user");
+    return 1;
+}
+```
+
+### 検証手順
+
+```sh
+# シェル 1: BestEffort sensor-data 10 Hz (Ctrl-C で停止)
+ros2 topic pub /sensor_data std_msgs/msg/String "data: 's-{01}'" \
+  --qos-reliability best_effort --qos-durability volatile --rate 10
+
+# シェル 2: Reliable 100 Hz (Ctrl-C で停止)
+ros2 topic pub /reliable_data std_msgs/msg/String "data: 'f-{01}'" \
+  --qos-reliability reliable --qos-durability volatile --rate 100
+
+# シェル 3: 検証コードを実行し、終了後に Ctrl-C で停止する
+dotnet run --project <path-to-test-app>
+```
+
+### Matched 判定の検証
+
+`WaitForMatchedAsync` で publisher の接続を検出できることを確認する。
+`CreateFrequencyMonitor` は topic が discovery で見つかっている必要があるため、
+先に publisher を発見させてから monitor を作成する。
+
+```csharp
+using ROSettaDDS.Msgs.Std;
+
+using var diag = node.CreateTopicDiagnostics();
+
+// ローカル Publisher を作成し topic を discovery に登録
+using var pub = node.CreatePublisher<StringMessage>(
+    "/lazy_pub", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+await Task.Delay(500, cts.Token); // SEDP 広告の伝搬を待つ
+
+// CreateFrequencyMonitor は一時 subscriber を作成し SEDP に登録する
+using var monitor = diag.CreateFrequencyMonitor("/lazy_pub");
+
+// Publisher が存在するので WaitForMatchedAsync は true を返す
+bool matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(5), cts.Token);
+Console.WriteLine($"matched: {matched}"); // true
+
+pub.Dispose();
+await Task.Delay(500, cts.Token);
+
+// Publisher が消えたので WaitForMatchedAsync は false (timeout)
+matched = await monitor.WaitForMatchedAsync(1, TimeSpan.FromSeconds(2), cts.Token);
+Console.WriteLine($"matched after dispose: {matched}"); // false
+```
+
+`WaitForMatchedAsync` の動作仕様:
+- timeout 経過で条件未達 → `false` を返す
+- `CancellationToken` による外部キャンセル → `OperationCanceledException`
+- `Dispose` による待機中断 → `ObjectDisposedException`
+
+レート計算は受信 timestamp 配列の直近 `WindowSize` 個から隣接 interval `(N-1)/WindowDuration` で求める。
+
+monitor が `using` スコープを抜けると Dispose され、一時 subscriber の receiver が停止し SEDP 登録が解除される。
+
+### 判定基準
+
+- BestEffort / Reliable ともに `GetStatistics().HasData == true` かつ `RateHz > 0` を満たすこと
+- レート値は ±20% の許容範囲内であること
+- `WaitForMatchedAsync` は publisher 生存中に `true` を返すこと (不在時は `false` または timeout)
+- 同一 topic に一時 subscriber が追加されることを許容すること
+
 ## 次に追加する検証
 
 - Best Effort publisher/subscriber の組み合わせ

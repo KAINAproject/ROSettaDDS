@@ -14,6 +14,7 @@ namespace ROSettaDDS.Dds;
 internal sealed class BestEffortUserReader : IUserReader
 {
     private readonly StatelessReader _reader;
+    private int _disposed;
 
     public BestEffortUserReader(
         GuidPrefix localPrefix,
@@ -46,6 +47,7 @@ internal sealed class BestEffortUserReader : IUserReader
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _reader.PayloadReceived -= OnPayloadReceived;
         _reader.Dispose();
     }

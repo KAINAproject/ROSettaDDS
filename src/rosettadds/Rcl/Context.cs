@@ -36,6 +36,7 @@ public sealed class Context : IDisposable
     private readonly UserEntityIdAllocator _userEntityIds = new();
     private readonly List<Node> _nodes = new();
     private readonly object _nodesLock = new();
+    private readonly object _graphLock = new();
 
     private bool _started;
     private bool _disposed;
@@ -58,6 +59,8 @@ public sealed class Context : IDisposable
         _receiver = new ParticipantRtpsReceiver(GuidPrefix, _options.Logger);
 
         _discoveryDb = new DiscoveryDb(_options.DiscoveryLimits);
+        _discoveryDb.ExternalLockEnter = () => Monitor.Enter(_graphLock);
+        _discoveryDb.ExternalLockExit = () => Monitor.Exit(_graphLock);
         _leaseExpiryMonitor = new LeaseExpiryMonitor(_discoveryDb, _options, _options.Logger);
 
         _spdpReader = new SpdpBuiltinParticipantReader(
@@ -153,18 +156,41 @@ public sealed class Context : IDisposable
 
     internal ParticipantTransportSet Transports => _transports;
     internal ParticipantRtpsReceiver Receiver => _receiver;
+    internal bool IsDisposed => _disposed;
     internal CancellationToken LeaseExpiryCancellationToken => _leaseExpiryMonitor.CancellationToken;
     internal UserEntityIdAllocator UserEntityIds => _userEntityIds;
+    internal object GraphLock => _graphLock;
     internal int PublishedPublicationStateCount => _sedpPublicationsWriter.PublishedCount;
+
+    // テスト用 hook (null のままでは本番動作に影響しない)
+    internal Action? GraphSnapshotEnterLockCallback { get; set; }
+    internal Action? GraphSnapshotPauseCallback { get; set; }
+    internal Action? GraphSnapshotBetweenLocalCollectionsCallback { get; set; }
+    internal Action<object>? GraphLockMutationCallback { get; set; }
+
+    /// <summary>テスト用: SEDP advertise (AddSubscriptionAsync / AddPublicationAsync) の直前に呼ばれる。</summary>
+    internal Func<ValueTask>? SedpAdvertiseDelay { get; set; }
+
+    /// <summary>テスト用: Node が使う IEndpointReceiver の代替。</summary>
+    internal IEndpointReceiver? ReceiverOverrideForTest { get; set; }
+
     internal int PublishedSubscriptionStateCount => _sedpSubscriptionsWriter.PublishedCount;
 
     // ----- SEDP 広告の Node 向け delegate -----
 
-    internal ValueTask AddPublicationAsync(DiscoveredEndpointData endpointData, CancellationToken token)
-        => _sedpPublicationsWriter.AddEndpointAsync(endpointData, token);
+    internal async ValueTask AddPublicationAsync(DiscoveredEndpointData endpointData, CancellationToken token)
+    {
+        if (SedpAdvertiseDelay is not null)
+            await SedpAdvertiseDelay().ConfigureAwait(false);
+        await _sedpPublicationsWriter.AddEndpointAsync(endpointData, token).ConfigureAwait(false);
+    }
 
-    internal ValueTask AddSubscriptionAsync(DiscoveredEndpointData endpointData, CancellationToken token)
-        => _sedpSubscriptionsWriter.AddEndpointAsync(endpointData, token);
+    internal async ValueTask AddSubscriptionAsync(DiscoveredEndpointData endpointData, CancellationToken token)
+    {
+        if (SedpAdvertiseDelay is not null)
+            await SedpAdvertiseDelay().ConfigureAwait(false);
+        await _sedpSubscriptionsWriter.AddEndpointAsync(endpointData, token).ConfigureAwait(false);
+    }
 
     internal ValueTask UnregisterPublicationAsync(DiscoveredEndpointData endpoint)
         => _sedpPublicationsWriter.UnregisterEndpointAsync(endpoint);
@@ -243,11 +269,16 @@ public sealed class Context : IDisposable
             }
 
             _transports.RestartOwnedTransports();
-            foreach (var node in SnapshotNodes())
+            var nodes = SnapshotNodes();
+            foreach (var node in nodes)
             {
-                var endpoints = node.RefreshLocalEndpointLocators(
-                    _transports.DefaultUnicastLocators,
-                    _transports.UserMulticastDestination);
+                EndpointDiscoverySnapshot endpoints;
+                lock (_graphLock)
+                {
+                    endpoints = node.RefreshLocalEndpointLocators(
+                        _transports.DefaultUnicastLocators,
+                        _transports.UserMulticastDestination);
+                }
                 foreach (var writer in endpoints.Writers)
                 {
                     await _sedpPublicationsWriter.AddEndpointAsync(writer, cancellationToken)
@@ -302,6 +333,87 @@ public sealed class Context : IDisposable
         {
             return _nodes.ToArray();
         }
+    }
+
+    /// <summary>
+    /// Context graph lock 下で全 Node の local endpoint と DiscoveryDb の remote endpoint を
+    /// 値コピーし、GUID 重複を除外して topic 名・GUID ordinal 順に並べたスナップショットを返す。
+    /// local mutation 経路も同一 graph lock を取得するため、競合 stable な境界を提供する。
+    /// </summary>
+    internal GraphSnapshot CreateGraphSnapshot()
+    {
+        ThrowIfDisposed();
+        var result = CollectSnapshotCore();
+        return new GraphSnapshot(result.endpoints.AsReadOnly());
+    }
+
+    /// <summary>
+    /// <see cref="CreateGraphSnapshot"/> と同じ snapshot に加え、local GUID 集合を同時に返す。
+    /// diagnostics など local/remote 判定が必要な呼び出し元向け。
+    /// </summary>
+    internal (GraphSnapshot Snapshot, HashSet<Guid> LocalGuids) CreateGraphSnapshotWithLocalInfo()
+    {
+        ThrowIfDisposed();
+        var result = CollectSnapshotCore();
+        return (new GraphSnapshot(result.endpoints.AsReadOnly()), result.localGuids);
+    }
+
+    private (List<DiscoveredEndpointData> endpoints, HashSet<Guid> localGuids) CollectSnapshotCore()
+    {
+        // _nodesLock → _graphLock の順で取得し、RegisterNode/UnregisterNode と逆転しない。
+        lock (_nodesLock)
+        lock (_graphLock)
+        {
+            GraphSnapshotEnterLockCallback?.Invoke();
+            GraphSnapshotPauseCallback?.Invoke();
+            if (_disposed) return (new List<DiscoveredEndpointData>(), new HashSet<Guid>());
+
+            var localWriters = new List<DiscoveredEndpointData>();
+            var localReaders = new List<DiscoveredEndpointData>();
+
+            foreach (var node in _nodes)
+            {
+                var local = node.LocalEndpointSnapshot();
+                localWriters.AddRange(local.Writers);
+                localReaders.AddRange(local.Readers);
+            }
+
+            var remote = _discoveryDb.CreateEndpointSnapshot();
+
+            var seen = new HashSet<Guid>();
+            var all = new List<DiscoveredEndpointData>();
+
+            foreach (var w in localWriters) { if (seen.Add(w.EndpointGuid)) all.Add(w); }
+            foreach (var w in remote.Writers) { if (seen.Add(w.EndpointGuid)) all.Add(w); }
+            foreach (var r in localReaders) { if (seen.Add(r.EndpointGuid)) all.Add(r); }
+            foreach (var r in remote.Readers) { if (seen.Add(r.EndpointGuid)) all.Add(r); }
+
+            all.Sort(static (a, b) =>
+            {
+                int topicCmp = string.CompareOrdinal(a.TopicName, b.TopicName);
+                if (topicCmp != 0) return topicCmp;
+                return CompareGuid(a.EndpointGuid, b.EndpointGuid);
+            });
+
+            // 全 endpoint metadata 収集完了 → local GUID 収集直前
+            GraphSnapshotBetweenLocalCollectionsCallback?.Invoke();
+
+            var localGuids = new HashSet<Guid>();
+            foreach (var w in localWriters) localGuids.Add(w.EndpointGuid);
+            foreach (var r in localReaders) localGuids.Add(r.EndpointGuid);
+
+            return (all, localGuids);
+        }
+    }
+
+    private static int CompareGuid(Guid a, Guid b)
+    {
+        Span<byte> aBytes = stackalloc byte[GuidPrefix.Size];
+        Span<byte> bBytes = stackalloc byte[GuidPrefix.Size];
+        a.Prefix.CopyTo(aBytes);
+        b.Prefix.CopyTo(bBytes);
+        int cmp = aBytes.SequenceCompareTo(bBytes);
+        return cmp != 0 ? cmp : a.EntityId.Value.CompareTo(b.EntityId.Value);
     }
 
     private void ThrowIfDisposed()

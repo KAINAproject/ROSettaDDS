@@ -16,6 +16,7 @@ namespace ROSettaDDS.Dds;
 internal sealed class ReliableUserReader : IUserReader
 {
     private readonly StatefulReader _reader;
+    private int _disposed;
 
     public ReliableUserReader(
         IRtpsTransport replyTransport,
@@ -65,6 +66,7 @@ internal sealed class ReliableUserReader : IUserReader
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _reader.PayloadReceived -= OnSampleReceived;
         _reader.Dispose();
     }

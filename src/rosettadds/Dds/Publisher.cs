@@ -18,7 +18,11 @@ public sealed class Publisher<T> : IDisposable
     private readonly StatefulWriter _writer;
     private readonly ICdrSerializer<T> _serializer;
     private readonly Action<Guid, StatefulWriter>? _unregisterEndpoint;
-    private bool _disposed;
+    internal Action? BeforeUnregister { get; set; }
+    internal Action? RemoveFromTracker { get; set; }
+    private int _disposed;
+    private Task? _advertiseTask;
+    private readonly ManualResetEventSlim _disposeCompleted = new();
 
     public string TopicName { get; }
     public Guid Guid => _writer.Guid;
@@ -158,19 +162,41 @@ public sealed class Publisher<T> : IDisposable
             minCount, timeout, cancellationToken);
     }
 
+    internal void SetAdvertiseTask(Task task) => _advertiseTask = task;
+
     public void Start() => _writer.Start();
     public void Stop() => _writer.Stop();
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _unregisterEndpoint?.Invoke(Guid, _writer);
-        _writer.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            _disposeCompleted.Wait();
+            return;
+        }
+
+        try
+        {
+            if (_advertiseTask is not null)
+            {
+                try { _advertiseTask.ConfigureAwait(false).GetAwaiter().GetResult(); }
+                catch { }
+            }
+
+            _writer.Stop();
+            BeforeUnregister?.Invoke();
+            _unregisterEndpoint?.Invoke(Guid, _writer);
+            _writer.Dispose();
+            RemoveFromTracker?.Invoke();
+        }
+        finally
+        {
+            _disposeCompleted.Set();
+        }
     }
 
     private void ThrowIfDisposed()
     {
-        if (_disposed) throw new ObjectDisposedException(GetType().Name);
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(GetType().Name);
     }
 }

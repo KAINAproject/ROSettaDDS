@@ -6,6 +6,7 @@ using ROSettaDDS.Dds.QoS;
 using ROSettaDDS.Discovery;
 using ROSettaDDS.Rtps;
 using ROSettaDDS.Rtps.HistoryCache;
+using ROSettaDDS.Rtps.Reader;
 using ROSettaDDS.Rtps.Writer;
 using ROSettaDDS.Transport;
 
@@ -17,6 +18,77 @@ public class UserEndpointManagerRefactoredTests
 {
     private static readonly GuidPrefix s_prefix = GuidPrefix.Create(VendorId.ROSettaDDS, 1, 2, 3);
     private static int s_writerCounter;
+
+    private sealed class RecordingEndpointReceiver : IEndpointReceiver
+    {
+        public List<(string operation, EntityId entityId)> CallSequence { get; } = new();
+        public List<EntityId> UnregisteredWriters { get; } = new();
+        public List<EntityId> UnregisteredReaders { get; } = new();
+
+        public int GetUnregisterWriterCount(EntityId entityId)
+            => UnregisteredWriters.Count(e => e == entityId);
+
+        public int GetUnregisterReaderCount(EntityId entityId)
+            => UnregisteredReaders.Count(e => e == entityId);
+
+        public void RegisterWriter(EntityId writerEntityId, StatefulWriter writer)
+        {
+            CallSequence.Add(("RegisterWriter", writerEntityId));
+        }
+
+        public void UnregisterWriter(EntityId writerEntityId)
+        {
+            CallSequence.Add(("UnregisterWriter", writerEntityId));
+            UnregisteredWriters.Add(writerEntityId);
+        }
+
+        public void RegisterReader(EntityId readerEntityId, IRtpsSubmessageHandler handler)
+        {
+            CallSequence.Add(("RegisterReader", readerEntityId));
+        }
+
+        public void UnregisterReader(EntityId readerEntityId)
+        {
+            CallSequence.Add(("UnregisterReader", readerEntityId));
+            UnregisteredReaders.Add(readerEntityId);
+        }
+    }
+
+    private sealed class ThrowingEndpointReceiver : IEndpointReceiver
+    {
+        public void RegisterWriter(EntityId writerEntityId, StatefulWriter writer)
+            => throw new InvalidOperationException("simulated writer registration failure");
+        public void UnregisterWriter(EntityId writerEntityId) { }
+        public void RegisterReader(EntityId readerEntityId, IRtpsSubmessageHandler handler)
+            => throw new InvalidOperationException("simulated reader registration failure");
+        public void UnregisterReader(EntityId readerEntityId) { }
+    }
+
+    private sealed class RecordingThrowingEndpointReceiver : IEndpointReceiver
+    {
+        public List<EntityId> RegisteredWriters { get; } = new();
+        public List<EntityId> RegisteredReaders { get; } = new();
+        public List<EntityId> UnregisteredWriters { get; } = new();
+        public List<EntityId> UnregisteredReaders { get; } = new();
+
+        public void RegisterWriter(EntityId writerEntityId, StatefulWriter writer)
+        {
+            RegisteredWriters.Add(writerEntityId);
+            throw new InvalidOperationException("simulated Phase 2 writer registration failure");
+        }
+
+        public void UnregisterWriter(EntityId writerEntityId)
+            => UnregisteredWriters.Add(writerEntityId);
+
+        public void RegisterReader(EntityId readerEntityId, IRtpsSubmessageHandler handler)
+        {
+            RegisteredReaders.Add(readerEntityId);
+            throw new InvalidOperationException("simulated Phase 2 reader registration failure");
+        }
+
+        public void UnregisterReader(EntityId readerEntityId)
+            => UnregisteredReaders.Add(readerEntityId);
+    }
 
     private sealed class RecordingTransport : IRtpsTransport
     {
@@ -188,29 +260,275 @@ public class UserEndpointManagerRefactoredTests
     }
 
     [Fact]
-    public void RemoteReaderChanged_は_同topicの_local_writerと_matchする()
+    public void Phase2_例外時に_手動rollback_paternで解放できる()
+    {
+        var receiver = new ThrowingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var writer = CreateWriter("rt/rollback", out var endpointData, out var writerGuid);
+
+        manager.RegisterWriterMetadata(endpointData, writer);
+        Assert.Throws<InvalidOperationException>(() =>
+            manager.CompleteWriterRegistration(endpointData, writer));
+
+        manager.CompleteWriterUnregistration(writerGuid, writer);
+        manager.Snapshot().Writers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Normal_RegisterUnregister_writerはmetadataを抹消する()
     {
         var receiver = new FakeEndpointReceiver();
         var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
-        var writer = CreateWriter("rt/chatter", out var endpointData, out _);
-        manager.RegisterWriter(endpointData, writer);
+        var writer = CreateWriter("rt/pairing", out var endpointData, out var writerGuid);
 
-        var remoteReaderGuid = new Guid(s_prefix, new EntityId(100, EntityKind.UserDefinedReaderNoKey));
-        var remoteReaderData = new DiscoveredEndpointData
+        manager.RegisterWriter(endpointData, writer);
+        manager.Snapshot().Writers.Should().Contain(writer);
+
+        manager.UnregisterWriter(writerGuid, writer);
+        manager.Snapshot().Writers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Normal_RegisterUnregister_readerはmetadataを抹消する()
+    {
+        var receiver = new FakeEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var topic = "rt/reader_pairing";
+        var guid = new Guid(s_prefix, new EntityId(200, EntityKind.UserDefinedReaderNoKey));
+        var userReader = new BestEffortUserReader(
+            s_prefix, guid.EntityId, NullLogger.Instance, DataFragReassemblyOptions.Default);
+        var endpointData = new DiscoveredEndpointData
         {
             Kind = EndpointKind.Reader,
-            EndpointGuid = remoteReaderGuid,
+            EndpointGuid = guid,
             ParticipantGuid = new Guid(s_prefix, EntityId.Participant),
-            TopicName = "rt/chatter",
+            TopicName = topic,
             TypeName = "TypeA",
             Reliability = ReliabilityQos.BestEffort,
             Durability = DurabilityQos.Volatile,
         };
-        remoteReaderData.UnicastLocators.Add(Locator.FromUdpV4(IPAddress.Loopback, 9999));
-        var remoteReader = new RemoteEndpoint(remoteReaderData, DateTime.UtcNow);
+        endpointData.UnicastLocators.Add(Locator.FromUdpV4(System.Net.IPAddress.Loopback, 7411));
 
-        manager.RemoteReaderChanged(remoteReader);
+        manager.RegisterReader(endpointData, userReader);
+        manager.Snapshot().Readers.Should().Contain(userReader);
 
-        writer.MatchedReaders.Should().ContainSingle(r => r.ReaderGuid == remoteReaderGuid);
+        manager.UnregisterReader(guid, userReader);
+        manager.Snapshot().Readers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void RecordingReceiver_Writerは二回目のUnregisterでNotFoundを返す()
+    {
+        var receiver = new RecordingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var writer = CreateWriter("rt/count_w", out var endpointData, out var writerGuid);
+        var eid = writer.WriterEntityId;
+
+        manager.RegisterWriter(endpointData, writer);
+
+        var first = manager.UnregisterWriter(writerGuid, writer);
+        first.Should().NotBe(UserEndpointManager.UnregisterResult.NotFound);
+
+        var second = manager.UnregisterWriter(writerGuid, writer);
+        second.Should().Be(UserEndpointManager.UnregisterResult.NotFound);
+
+        manager.Snapshot().Writers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void RecordingReceiver_Readerは二回目のUnregisterでNotFoundを返す()
+    {
+        var receiver = new RecordingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var guid = new Guid(s_prefix, new EntityId(201, EntityKind.UserDefinedReaderNoKey));
+        var userReader = new BestEffortUserReader(
+            s_prefix, guid.EntityId, NullLogger.Instance, DataFragReassemblyOptions.Default);
+        var endpointData = new DiscoveredEndpointData
+        {
+            Kind = EndpointKind.Reader,
+            EndpointGuid = guid,
+            ParticipantGuid = new Guid(s_prefix, EntityId.Participant),
+            TopicName = "rt/count_r",
+            TypeName = "TypeA",
+            Reliability = ReliabilityQos.BestEffort,
+            Durability = DurabilityQos.Volatile,
+        };
+        endpointData.UnicastLocators.Add(Locator.FromUdpV4(System.Net.IPAddress.Loopback, 7411));
+
+        manager.RegisterReader(endpointData, userReader);
+
+        var first = manager.UnregisterReader(guid, userReader);
+        first.Should().NotBe(UserEndpointManager.UnregisterResult.NotFound);
+
+        var second = manager.UnregisterReader(guid, userReader);
+        second.Should().Be(UserEndpointManager.UnregisterResult.NotFound);
+
+        manager.Snapshot().Readers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void RecordingReceiver_WriterはRegisterのみreceiverを呼ぶ()
+    {
+        var receiver = new RecordingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var writer = CreateWriter("rt/order_w", out var endpointData, out var writerGuid);
+        var eid = writer.WriterEntityId;
+
+        manager.RegisterWriter(endpointData, writer);
+        manager.UnregisterWriter(writerGuid, writer);
+
+        var seq = receiver.CallSequence;
+        seq.Should().HaveCount(1);
+        seq[0].Should().Be(("RegisterWriter", eid));
+    }
+
+    [Fact]
+    public void RecordingReceiver_ReaderはRegisterのみreceiverを呼ぶ()
+    {
+        var receiver = new RecordingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var guid = new Guid(s_prefix, new EntityId(202, EntityKind.UserDefinedReaderNoKey));
+        var userReader = new BestEffortUserReader(
+            s_prefix, guid.EntityId, NullLogger.Instance, DataFragReassemblyOptions.Default);
+        var endpointData = new DiscoveredEndpointData
+        {
+            Kind = EndpointKind.Reader,
+            EndpointGuid = guid,
+            ParticipantGuid = new Guid(s_prefix, EntityId.Participant),
+            TopicName = "rt/order_r",
+            TypeName = "TypeA",
+            Reliability = ReliabilityQos.BestEffort,
+            Durability = DurabilityQos.Volatile,
+        };
+        endpointData.UnicastLocators.Add(Locator.FromUdpV4(System.Net.IPAddress.Loopback, 7411));
+
+        manager.RegisterReader(endpointData, userReader);
+        manager.UnregisterReader(guid, userReader);
+
+        var seq = receiver.CallSequence;
+        seq.Should().HaveCount(1);
+        seq[0].Should().Be(("RegisterReader", guid.EntityId));
+    }
+
+    [Fact]
+    public void Phase2_writer_registration_failure_は_rollbackでmetadataを抹消する()
+    {
+        var receiver = new RecordingThrowingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var writer = CreateWriter("rt/rollback_writer", out var endpointData, out var writerGuid);
+        var writerEntityId = writer.WriterEntityId;
+
+        manager.RegisterWriterMetadata(endpointData, writer);
+        Assert.Throws<InvalidOperationException>(() =>
+            manager.CompleteWriterRegistration(endpointData, writer));
+
+        // Phase 2 は receiver 到達後に失敗している
+        receiver.RegisteredWriters.Should().Contain(writerEntityId,
+            "Phase 2 failure occurred after reaching receiver");
+
+        // Node の catch ブロックと同じ手動 rollback (receiver unregister → metadata)
+        receiver.UnregisterWriter(writerEntityId);
+        manager.CompleteWriterUnregistration(writerGuid, writer);
+
+        // Complete*Unregistration は metadata 抹消のみ行う
+        receiver.UnregisteredWriters.Should().Contain(writerEntityId,
+            "receiver unregister must be called explicitly before Complete*Unregistration");
+        manager.Snapshot().Writers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Phase2_reader_registration_failure_は_rollbackでmetadataを抹消する()
+    {
+        var receiver = new RecordingThrowingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var topic = "rt/rollback_reader";
+        var guid = new Guid(s_prefix, new EntityId(300, EntityKind.UserDefinedReaderNoKey));
+        var userReader = new BestEffortUserReader(
+            s_prefix, guid.EntityId, NullLogger.Instance, DataFragReassemblyOptions.Default);
+        var endpointData = new DiscoveredEndpointData
+        {
+            Kind = EndpointKind.Reader,
+            EndpointGuid = guid,
+            ParticipantGuid = new Guid(s_prefix, EntityId.Participant),
+            TopicName = topic,
+            TypeName = "TypeA",
+            Reliability = ReliabilityQos.BestEffort,
+            Durability = DurabilityQos.Volatile,
+        };
+        endpointData.UnicastLocators.Add(Locator.FromUdpV4(System.Net.IPAddress.Loopback, 7411));
+
+        manager.RegisterReaderMetadata(endpointData, userReader);
+        Assert.Throws<InvalidOperationException>(() =>
+            manager.CompleteReaderRegistration(endpointData, userReader));
+
+        receiver.RegisteredReaders.Should().Contain(guid.EntityId,
+            "Phase 2 failure occurred after reaching receiver");
+
+        // Node の catch ブロックと同じ手動 rollback
+        receiver.UnregisterReader(guid.EntityId);
+        manager.CompleteReaderUnregistration(guid, userReader);
+
+        receiver.UnregisteredReaders.Should().Contain(guid.EntityId,
+            "receiver unregister must be called explicitly before Complete*Unregistration");
+        manager.Snapshot().Readers.Should().BeEmpty();
+    }
+
+    // ========================================================================
+    // Idempotent Complete*Unregistration
+    // ========================================================================
+
+    [Fact]
+    public void CompleteWriterUnregistration_二回目はNotFoundを返しreceiverを呼ばない()
+    {
+        var receiver = new RecordingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var writer = CreateWriter("rt/idem_w", out var endpointData, out var writerGuid);
+
+        manager.RegisterWriter(endpointData, writer);
+
+        var first = manager.CompleteWriterUnregistration(writerGuid, writer);
+        first.Should().NotBe(UserEndpointManager.UnregisterResult.NotFound);
+        first.Endpoint.Should().NotBeNull();
+
+        var second = manager.CompleteWriterUnregistration(writerGuid, writer);
+        second.Should().Be(UserEndpointManager.UnregisterResult.NotFound);
+
+        // Complete*Unregistration は receiver を呼ばない
+        receiver.UnregisteredWriters.Should().BeEmpty();
+        manager.Snapshot().Writers.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void CompleteReaderUnregistration_二回目はNotFoundを返しreceiverを呼ばない()
+    {
+        var receiver = new RecordingEndpointReceiver();
+        var manager = new UserEndpointManager(new DiscoveryDb(), receiver, NullLogger.Instance);
+        var guid = new Guid(s_prefix, new EntityId(500, EntityKind.UserDefinedReaderNoKey));
+        var userReader = new BestEffortUserReader(
+            s_prefix, guid.EntityId, NullLogger.Instance, DataFragReassemblyOptions.Default);
+        var endpointData = new DiscoveredEndpointData
+        {
+            Kind = EndpointKind.Reader,
+            EndpointGuid = guid,
+            ParticipantGuid = new Guid(s_prefix, EntityId.Participant),
+            TopicName = "rt/idem_r",
+            TypeName = "TypeA",
+            Reliability = ReliabilityQos.BestEffort,
+            Durability = DurabilityQos.Volatile,
+        };
+        endpointData.UnicastLocators.Add(Locator.FromUdpV4(System.Net.IPAddress.Loopback, 7411));
+
+        manager.RegisterReader(endpointData, userReader);
+
+        var first = manager.CompleteReaderUnregistration(guid, userReader);
+        first.Should().NotBe(UserEndpointManager.UnregisterResult.NotFound);
+        first.Endpoint.Should().NotBeNull();
+
+        var second = manager.CompleteReaderUnregistration(guid, userReader);
+        second.Should().Be(UserEndpointManager.UnregisterResult.NotFound);
+
+        // Complete*Unregistration は receiver を呼ばない
+        receiver.UnregisteredReaders.Should().BeEmpty();
+        manager.Snapshot().Readers.Should().BeEmpty();
     }
 }

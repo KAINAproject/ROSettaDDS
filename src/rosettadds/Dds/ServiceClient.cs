@@ -21,7 +21,12 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     private readonly ILogger _logger;
     private readonly CdrReadLimits _cdrReadLimits;
     private readonly ConcurrentDictionary<SampleIdentity, TaskCompletionSource<TResponse>> _pending = new();
-    private bool _disposed;
+    private readonly object _pendingLock = new();
+    private readonly Action<Guid, IUserReader>? _unregisterReplyEndpoint;
+    internal Action? RemoveFromTracker { get; set; }
+    private int _disposed;
+    private Task? _replyReaderAdvertiseTask;
+    private readonly ManualResetEventSlim _disposeCompleted = new();
 
     /// <summary>request writer の RTPS GUID。相関キーの writer 部に使う。</summary>
     public Guid RequestWriterGuid => _requestPublisher.Guid;
@@ -31,13 +36,15 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
         ReliableUserReader replyReader,
         ServiceDescriptor<TRequest, TResponse> descriptor,
         ILogger logger,
-        CdrReadLimits cdrReadLimits)
+        CdrReadLimits cdrReadLimits,
+        Action<Guid, IUserReader>? unregisterReplyEndpoint = null)
     {
         _requestPublisher = requestPublisher;
         _replyReader = replyReader;
         _descriptor = descriptor;
         _logger = logger;
         _cdrReadLimits = cdrReadLimits;
+        _unregisterReplyEndpoint = unregisterReplyEndpoint;
         _replyReader.SampleReceived += OnReplyReceived;
     }
 
@@ -69,16 +76,38 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
         var tcs = new TaskCompletionSource<TResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         SampleIdentity key = default;
-        await _requestPublisher.PublishReturningSequenceNumberAsync(
-            request,
-            assignedSn =>
-            {
-                key = new SampleIdentity(_requestPublisher.Guid, assignedSn);
-                _pending[key] = tcs;
-            },
-            cancellationToken).ConfigureAwait(false);
+        bool added = false;
+        try
+        {
+            await _requestPublisher.PublishReturningSequenceNumberAsync(
+                request,
+                assignedSn =>
+                {
+                    key = new SampleIdentity(_requestPublisher.Guid, assignedSn);
+                    lock (_pendingLock)
+                    {
+                        if (_disposed != 0)
+                            throw new ObjectDisposedException(nameof(ServiceClient<TRequest, TResponse>));
+                        _pending[key] = tcs;
+                    }
+                    added = true;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            if (added && _pending.TryRemove(key, out var removedTcs))
+                removedTcs.TrySetCanceled(cancellationToken);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            if (added && _pending.TryRemove(key, out var removedTcs))
+                removedTcs.TrySetException(ex);
+            throw;
+        }
 
-        using var timeoutCts =CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(timeout);
         using (timeoutCts.Token.Register(static state =>
         {
@@ -141,25 +170,57 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     /// <summary>テスト用: reply を直接注入して相関ロジックを検証する。</summary>
     internal void InjectReplyForTest(CacheChange change) => OnReplyReceived(change);
 
+    /// <summary>テスト用: reply reader の EntityId。</summary>
+    internal EntityId ReplyReaderEntityIdForTest => _replyReader.ReaderEntityId;
+
     /// <summary>テスト用: 未解決の保留リクエスト数。</summary>
     internal int PendingRequestCount => _pending.Count;
 
+    internal void SetReplyReaderAdvertiseTask(Task task) => _replyReaderAdvertiseTask = task;
+
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _replyReader.SampleReceived -= OnReplyReceived;
-        foreach (var kv in _pending)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            kv.Value.TrySetException(new ObjectDisposedException(nameof(ServiceClient<TRequest, TResponse>)));
+            _disposeCompleted.Wait();
+            return;
         }
-        _pending.Clear();
-        _requestPublisher.Dispose();
-        _replyReader.Dispose();
+
+        try
+        {
+            _replyReader.SampleReceived -= OnReplyReceived;
+
+            KeyValuePair<SampleIdentity, TaskCompletionSource<TResponse>>[] pendingSnapshot;
+            lock (_pendingLock)
+            {
+                pendingSnapshot = _pending.ToArray();
+                _pending.Clear();
+            }
+            foreach (var kv in pendingSnapshot)
+            {
+                kv.Value.TrySetException(new ObjectDisposedException(nameof(ServiceClient<TRequest, TResponse>)));
+            }
+
+            if (_replyReaderAdvertiseTask is not null)
+            {
+                try { _replyReaderAdvertiseTask.ConfigureAwait(false).GetAwaiter().GetResult(); }
+                catch { }
+            }
+
+            _replyReader.Stop();
+            _unregisterReplyEndpoint?.Invoke(_replyReader.Guid, _replyReader);
+            _requestPublisher.Dispose();
+            _replyReader.Dispose();
+            RemoveFromTracker?.Invoke();
+        }
+        finally
+        {
+            _disposeCompleted.Set();
+        }
     }
 
     private void ThrowIfDisposed()
     {
-        if (_disposed) throw new ObjectDisposedException(GetType().Name);
+        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(GetType().Name);
     }
 }

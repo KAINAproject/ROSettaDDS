@@ -41,4 +41,28 @@ public sealed class DiscoveredEndpointData
 
     /// <summary>endpoint の multicast ロケータ (PID_MULTICAST_LOCATOR)。</summary>
     public List<Locator> MulticastLocators { get; } = new();
+
+    internal DiscoveredEndpointData Clone()
+    {
+        var clone = new DiscoveredEndpointData
+        {
+            Kind = Kind,
+            EndpointGuid = EndpointGuid,
+            ParticipantGuid = ParticipantGuid,
+            TopicName = TopicName,
+            TypeName = TypeName,
+            Reliability = Reliability,
+            Durability = Durability,
+            Deadline = Deadline,
+            LatencyBudget = LatencyBudget,
+            Liveliness = Liveliness,
+            Ownership = Ownership,
+            DestinationOrder = DestinationOrder,
+            Presentation = Presentation,
+            Partition = new PartitionQos(Partition.Names.ToArray()),
+        };
+        clone.UnicastLocators.AddRange(UnicastLocators);
+        clone.MulticastLocators.AddRange(MulticastLocators);
+        return clone;
+    }
 }

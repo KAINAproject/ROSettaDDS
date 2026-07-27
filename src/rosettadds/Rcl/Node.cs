@@ -571,7 +571,7 @@ public sealed class Node : IDisposable
     private void UnregisterAllLocalEndpoints()
     {
         var endpoints = _userEndpoints.Snapshot();
-        
+
         foreach (var writer in endpoints.Writers)
         {
             try
@@ -581,7 +581,7 @@ public sealed class Node : IDisposable
                 writer.Stop();
             }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
-            
+
             try
             {
                 TestEventRecorder?.Invoke("BeforeWriterUnregister");
@@ -589,7 +589,7 @@ public sealed class Node : IDisposable
                 UnregisterLocalWriter(writer.Guid, writer);
             }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
-            
+
             try
             {
                 TestEventRecorder?.Invoke("BeforeWriterDispose");
@@ -602,7 +602,7 @@ public sealed class Node : IDisposable
         foreach (var reader in endpoints.Readers)
         {
             var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
-            
+
             try
             {
                 TestEventRecorder?.Invoke("BeforeReaderStop");
@@ -610,7 +610,7 @@ public sealed class Node : IDisposable
                 reader.Stop();
             }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
-            
+
             try
             {
                 TestEventRecorder?.Invoke("BeforeReaderUnregister");
@@ -618,7 +618,7 @@ public sealed class Node : IDisposable
                 UnregisterLocalReader(readerGuid, reader);
             }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
-            
+
             try
             {
                 TestEventRecorder?.Invoke("BeforeReaderDispose");

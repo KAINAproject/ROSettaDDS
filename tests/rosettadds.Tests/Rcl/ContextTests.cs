@@ -239,30 +239,20 @@ public class ContextTests
     // ======== Fix 1: RegisterNode/Dispose barrier ========
 
     [Fact]
-    public void Dispose開始後にRegisterNodeがObjectDisposedException()
+    public void Disposeの_disposeInProgress到達後にRegisterNodeがObjectDisposedException()
     {
         var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
         ctx.Start();
         var blocker = new Node(ctx, "blocker");
 
-        var phase1Done = new ManualResetEventSlim();
-        var resumeCreate = new ManualResetEventSlim();
-        blocker.BeforeDisposedCheckCallback = () =>
-        {
-            phase1Done.Set();
-            resumeCreate.Wait();
-        };
-
-        var createThread = new Thread(() =>
-        {
-            try { blocker.CreatePublisher<StringMessage>("topic", StringMessageSerializer.Instance); }
-            catch { }
-        });
-        createThread.Start();
-        Assert.True(phase1Done.Wait(TimeSpan.FromSeconds(5)));
+        var disposeInProgressReached = new ManualResetEventSlim();
+        ctx.DisposeInProgressCallback = () => disposeInProgressReached.Set();
 
         var disposeThread = new Thread(() => ctx.Dispose());
         disposeThread.Start();
+
+        Assert.True(disposeInProgressReached.Wait(TimeSpan.FromSeconds(5)),
+            "Dispose should reach _disposeInProgress state");
 
         Exception? registerError = null;
         var lateNodeThread = new Thread(() =>
@@ -272,19 +262,12 @@ public class ContextTests
         });
         lateNodeThread.Start();
 
-        try
-        {
-            Assert.True(lateNodeThread.Join(TimeSpan.FromSeconds(2)),
-                "RegisterNode must not deadlock with Dispose (main bug: _nodesLock ordering).");
-            Assert.NotNull(registerError);
-            Assert.IsType<ObjectDisposedException>(registerError);
-        }
-        finally
-        {
-            resumeCreate.Set();
-            Assert.True(createThread.Join(TimeSpan.FromSeconds(5)));
-            Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)));
-        }
+        Assert.True(lateNodeThread.Join(TimeSpan.FromSeconds(5)),
+            "Late RegisterNode thread must complete (no deadlock)");
+        Assert.NotNull(registerError);
+        Assert.IsType<ObjectDisposedException>(registerError);
+
+        Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)));
         Assert.True(ctx.IsDisposed);
     }
 

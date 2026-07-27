@@ -25,6 +25,7 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     private readonly Action<Guid, IUserReader>? _unregisterReplyEndpoint;
     internal Action? RemoveFromTracker { get; set; }
     private int _disposed;
+    private readonly CancellationTokenSource _disposeCts = new();
     private Task? _replyReaderAdvertiseTask;
     private readonly ManualResetEventSlim _disposeCompleted = new();
 
@@ -52,22 +53,24 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     public async Task<bool> WaitForServiceAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
         ThrowIfDisposed();
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
             ThrowIfDisposed();
             if (IsServiceReady())
             {
+                ThrowIfDisposed();
                 return true;
             }
-            cancellationToken.ThrowIfCancellationRequested();
+            linkedCts.Token.ThrowIfCancellationRequested();
             try
             {
-                await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(20, linkedCts.Token).ConfigureAwait(false);
             }
-            catch (ObjectDisposedException)
+            catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested)
             {
-                throw;
+                throw new ObjectDisposedException(GetType().Name);
             }
         }
         ThrowIfDisposed();
@@ -196,6 +199,8 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
             return;
         }
 
+        _disposeCts.Cancel();
+
         try
         {
             _replyReader.SampleReceived -= OnReplyReceived;
@@ -225,6 +230,7 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
         }
         finally
         {
+            _disposeCts.Dispose();
             _disposeCompleted.Set();
         }
     }

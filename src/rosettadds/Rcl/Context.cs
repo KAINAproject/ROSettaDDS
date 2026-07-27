@@ -172,6 +172,7 @@ public sealed class Context : IDisposable
     internal Action? GraphSnapshotPauseCallback { get; set; }
     internal Action? GraphSnapshotBetweenLocalCollectionsCallback { get; set; }
     internal Action<object>? GraphLockMutationCallback { get; set; }
+    internal Action? DisposeInProgressCallback { get; set; }
 
     /// <summary>テスト用: SEDP advertise (AddSubscriptionAsync / AddPublicationAsync) の直前に呼ばれる。</summary>
     internal Func<ValueTask>? SedpAdvertiseDelay { get; set; }
@@ -249,6 +250,11 @@ public sealed class Context : IDisposable
                 _disposeInProgress = true;
                 shouldDispose = true;
             }
+        }
+
+        if (shouldDispose)
+        {
+            DisposeInProgressCallback?.Invoke();
         }
 
         if (!shouldDispose)

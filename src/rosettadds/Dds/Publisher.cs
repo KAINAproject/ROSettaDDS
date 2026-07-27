@@ -20,6 +20,7 @@ public sealed class Publisher<T> : IDisposable
     private readonly Action<Guid, StatefulWriter>? _unregisterEndpoint;
     internal Action? BeforeUnregister { get; set; }
     internal Action? RemoveFromTracker { get; set; }
+    internal Action<string>? DisposeFaultInjector { get; set; }
     private int _disposed;
     private Task? _advertiseTask;
     private readonly ManualResetEventSlim _disposeCompleted = new();
@@ -175,6 +176,8 @@ public sealed class Publisher<T> : IDisposable
             return;
         }
 
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? firstError = null;
+
         try
         {
             if (_advertiseTask is not null)
@@ -183,16 +186,39 @@ public sealed class Publisher<T> : IDisposable
                 catch { }
             }
 
-            _writer.Stop();
-            BeforeUnregister?.Invoke();
-            _unregisterEndpoint?.Invoke(Guid, _writer);
-            _writer.Dispose();
-            RemoveFromTracker?.Invoke();
+            try
+            {
+                DisposeFaultInjector?.Invoke("BeforeStop");
+                _writer.Stop();
+            }
+            catch (Exception ex) { firstError ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+
+            try { BeforeUnregister?.Invoke(); }
+            catch (Exception ex) { firstError ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+
+            try
+            {
+                DisposeFaultInjector?.Invoke("BeforeUnregister");
+                _unregisterEndpoint?.Invoke(Guid, _writer);
+            }
+            catch (Exception ex) { firstError ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+
+            try
+            {
+                DisposeFaultInjector?.Invoke("BeforeWriterDispose");
+                _writer.Dispose();
+            }
+            catch (Exception ex) { firstError ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+
+            try { RemoveFromTracker?.Invoke(); }
+            catch (Exception ex) { firstError ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
         finally
         {
             _disposeCompleted.Set();
         }
+
+        firstError?.Throw();
     }
 
     private void ThrowIfDisposed()

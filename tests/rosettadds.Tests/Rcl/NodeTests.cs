@@ -1264,7 +1264,7 @@ public class NodeTests
     }
 
     [Fact]
-    public async Task ServiceClient_WaitForServiceAsync_待機中にDisposeで即座に解除()
+    public async Task ServiceClient_WaitForServiceAsync_待機中にDisposeでObjectDisposedException()
     {
         using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
         ctx.Start();
@@ -1279,23 +1279,66 @@ public class NodeTests
 
         var client = node.CreateServiceClient(descriptor, svcName);
 
-        var waitStarted = new ManualResetEventSlim();
+        var waitEntered = new ManualResetEventSlim();
         var waitTask = Task.Run(async () =>
         {
-            waitStarted.Set();
-            return await client.WaitForServiceAsync(TimeSpan.FromSeconds(10));
+            waitEntered.Set();
+            return await client.WaitForServiceAsync(TimeSpan.FromSeconds(30));
         });
 
-        Assert.True(waitStarted.Wait(TimeSpan.FromSeconds(5)));
+        Assert.True(waitEntered.Wait(TimeSpan.FromSeconds(5)));
         await Task.Delay(100);
 
-        var disposeTask = Task.Run(() => client.Dispose());
+        client.Dispose();
 
-        var completed = await Task.WhenAny(waitTask, disposeTask, Task.Delay(TimeSpan.FromSeconds(2)));
-        Assert.True(completed != Task.Delay(TimeSpan.FromSeconds(2)),
-            "WaitForServiceAsync or Dispose should complete within 2 seconds");
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => waitTask.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
 
-        await Task.WhenAll(waitTask.ContinueWith(_ => { }), disposeTask);
+    [Fact]
+    public void Node_Dispose_で先頭endpointのStopがthrowしても後続cleanupは継続する()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "endpoint_cleanup_fault");
+
+        var pub1 = node.CreatePublisher<StringMessage>("topic1", StringMessageSerializer.Instance);
+        var pub2 = node.CreatePublisher<StringMessage>("topic2", StringMessageSerializer.Instance);
+
+        var events = new ConcurrentBag<string>();
+        var firstStop = true;
+        pub1.DisposeFaultInjector = eventName =>
+        {
+            events.Add($"pub1:{eventName}");
+            if (firstStop && eventName == "BeforeStop")
+            {
+                firstStop = false;
+                throw new InvalidOperationException("injected Stop failure");
+            }
+        };
+        pub2.DisposeFaultInjector = eventName => events.Add($"pub2:{eventName}");
+
+        Exception? caughtEx = null;
+        try
+        {
+            node.Dispose();
+        }
+        catch (Exception ex)
+        {
+            caughtEx = ex;
+        }
+
+        Assert.NotNull(caughtEx);
+        Assert.IsType<InvalidOperationException>(caughtEx);
+        Assert.Equal("injected Stop failure", caughtEx.Message);
+
+        var eventList = events.ToList();
+        eventList.Should().Contain("pub1:BeforeStop");
+        eventList.Should().Contain("pub1:BeforeUnregister");
+        eventList.Should().Contain("pub1:BeforeWriterDispose");
+        eventList.Should().Contain("pub2:BeforeStop");
+        eventList.Should().Contain("pub2:BeforeUnregister");
+        eventList.Should().Contain("pub2:BeforeWriterDispose");
     }
 
     private static int GetPendingRegistrationsField(Node node)

@@ -37,6 +37,8 @@ public sealed class Node : IDisposable
     internal Action? BeforeCreateStartCallback { get; set; }
     internal Action<string>? TestEventRecorder { get; set; }
     internal Action? AfterWrapperTracked { get; set; }
+    internal Action<string>? EndpointCleanupFaultInjector { get; set; }
+    internal Func<IDisposable, string, bool>? WrapperDisposeFaultInjector { get; set; }
 
     internal int TrackedWrapperCount
     {
@@ -570,12 +572,15 @@ public sealed class Node : IDisposable
         
         foreach (var writer in endpoints.Writers)
         {
+            EndpointCleanupFaultInjector?.Invoke("BeforeWriterStop");
             try { writer.Stop(); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
+            EndpointCleanupFaultInjector?.Invoke("BeforeWriterUnregister");
             try { UnregisterLocalWriter(writer.Guid, writer); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
+            EndpointCleanupFaultInjector?.Invoke("BeforeWriterDispose");
             try { writer.Dispose(); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
@@ -584,12 +589,15 @@ public sealed class Node : IDisposable
         {
             var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
             
+            EndpointCleanupFaultInjector?.Invoke("BeforeReaderStop");
             try { reader.Stop(); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
+            EndpointCleanupFaultInjector?.Invoke("BeforeReaderUnregister");
             try { UnregisterLocalReader(readerGuid, reader); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
+            EndpointCleanupFaultInjector?.Invoke("BeforeReaderDispose");
             try { reader.Dispose(); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }

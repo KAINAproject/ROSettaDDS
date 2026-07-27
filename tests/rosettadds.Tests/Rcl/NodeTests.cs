@@ -1282,6 +1282,14 @@ public class NodeTests
         var waitLoopEntered = new ManualResetEventSlim();
         client.WaitLoopEntered = () => waitLoopEntered.Set();
 
+        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delayInvoked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.WaitDelayAsync = (delay, ct) =>
+        {
+            delayInvoked.TrySetResult(true);
+            return gate.Task.WaitAsync(ct);
+        };
+
         var waitTask = Task.Run(async () =>
         {
             return await client.WaitForServiceAsync(TimeSpan.FromSeconds(30));
@@ -1289,8 +1297,12 @@ public class NodeTests
 
         Assert.True(waitLoopEntered.Wait(TimeSpan.FromSeconds(5)),
             "WaitForServiceAsync should enter the wait loop");
+        Assert.True(await delayInvoked.Task.WaitAsync(TimeSpan.FromSeconds(5)),
+            "WaitDelayAsync should be invoked");
 
         client.Dispose();
+
+        gate.TrySetResult(true);
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => waitTask.WaitAsync(TimeSpan.FromSeconds(2)));

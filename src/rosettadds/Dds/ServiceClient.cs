@@ -30,6 +30,7 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     private readonly ManualResetEventSlim _disposeCompleted = new();
 
     internal Action? WaitLoopEntered { get; set; }
+    internal Func<TimeSpan, CancellationToken, Task>? WaitDelayAsync { get; set; }
 
     /// <summary>request writer の RTPS GUID。相関キーの writer 部に使う。</summary>
     public Guid RequestWriterGuid => _requestPublisher.Guid;
@@ -74,7 +75,10 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
             try
             {
                 linkedCts.Token.ThrowIfCancellationRequested();
-                await Task.Delay(20, linkedCts.Token).ConfigureAwait(false);
+                var delayTask = WaitDelayAsync is not null
+                    ? WaitDelayAsync(TimeSpan.FromMilliseconds(20), linkedCts.Token)
+                    : Task.Delay(TimeSpan.FromMilliseconds(20), linkedCts.Token);
+                await delayTask.ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested)
             {

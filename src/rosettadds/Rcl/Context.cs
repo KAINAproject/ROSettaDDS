@@ -1,4 +1,5 @@
 using System.Net;
+using System.Runtime.ExceptionServices;
 using System.Threading;
 using ROSettaDDS.Cdr;
 using ROSettaDDS.Common;
@@ -40,6 +41,10 @@ public sealed class Context : IDisposable
 
     private bool _started;
     private bool _disposed;
+    private bool _disposeInProgress;
+    private readonly object _disposeGate = new();
+    private readonly ManualResetEventSlim _disposeCompletedGate = new();
+    private System.Runtime.ExceptionServices.ExceptionDispatchInfo? _disposeException;
 
     public Context(ContextOptions options)
         : this(options, SystemNetworkChangeSource.Instance)
@@ -167,6 +172,7 @@ public sealed class Context : IDisposable
     internal Action? GraphSnapshotPauseCallback { get; set; }
     internal Action? GraphSnapshotBetweenLocalCollectionsCallback { get; set; }
     internal Action<object>? GraphLockMutationCallback { get; set; }
+    internal Action? DisposeInProgressCallback { get; set; }
 
     /// <summary>テスト用: SEDP advertise (AddSubscriptionAsync / AddPublicationAsync) の直前に呼ばれる。</summary>
     internal Func<ValueTask>? SedpAdvertiseDelay { get; set; }
@@ -232,21 +238,69 @@ public sealed class Context : IDisposable
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _networkRecovery?.Dispose();
-        // Stop() は _disposed をチェックするので、先に Stop() してから _disposed = true にする。
-        Stop();
-        DisposeTrackedNodes();
-        _disposed = true;
-        _sedpPublicationsWriter.Dispose();
-        _sedpSubscriptionsWriter.Dispose();
-        _sedpPublicationsReader.Dispose();
-        _sedpSubscriptionsReader.Dispose();
-        _spdpWriter.Dispose();
-        _spdpReader.Dispose();
-        _leaseExpiryMonitor.Dispose();
-        _receiver.Dispose();
-        _transports.Dispose();
+        bool shouldDispose;
+        lock (_disposeGate)
+        {
+            if (_disposed || _disposeInProgress)
+            {
+                shouldDispose = false;
+            }
+            else
+            {
+                _disposeInProgress = true;
+                shouldDispose = true;
+            }
+        }
+
+        if (shouldDispose)
+        {
+            DisposeInProgressCallback?.Invoke();
+        }
+
+        if (!shouldDispose)
+        {
+            _disposeCompletedGate.Wait();
+            lock (_disposeGate)
+            {
+                if (_disposeException is not null)
+                    _disposeException.Throw();
+            }
+            return;
+        }
+
+        ExceptionDispatchInfo? firstError = null;
+        try
+        {
+            TryRun(() => _networkRecovery?.Dispose(), ref firstError);
+            TryRun(Stop, ref firstError);
+            TryRun(DisposeTrackedNodes, ref firstError);
+            TryRun(() => _sedpPublicationsWriter.Dispose(), ref firstError);
+            TryRun(() => _sedpSubscriptionsWriter.Dispose(), ref firstError);
+            TryRun(() => _sedpPublicationsReader.Dispose(), ref firstError);
+            TryRun(() => _sedpSubscriptionsReader.Dispose(), ref firstError);
+            TryRun(() => _spdpWriter.Dispose(), ref firstError);
+            TryRun(() => _spdpReader.Dispose(), ref firstError);
+            TryRun(() => _leaseExpiryMonitor.Dispose(), ref firstError);
+            TryRun(() => _receiver.Dispose(), ref firstError);
+            TryRun(() => _transports.Dispose(), ref firstError);
+        }
+        finally
+        {
+            lock (_disposeGate)
+            {
+                _disposed = true;
+                _disposeException = firstError;
+            }
+            _disposeCompletedGate.Set();
+        }
+
+        firstError?.Throw();
+    }
+
+    private static void TryRun(Action action, ref ExceptionDispatchInfo? firstError)
+    {
+        try { action(); }
+        catch (Exception ex) { firstError ??= ExceptionDispatchInfo.Capture(ex); }
     }
 
     internal async ValueTask RecoverNetworkAsync(CancellationToken cancellationToken)
@@ -307,8 +361,15 @@ public sealed class Context : IDisposable
 
     internal void RegisterNode(Node node)
     {
-        ThrowIfDisposed();
-        lock (_nodesLock) _nodes.Add(node);
+        lock (_disposeGate)
+        {
+            if (_disposed || _disposeInProgress)
+                throw new ObjectDisposedException(GetType().Name);
+            lock (_nodesLock)
+            {
+                _nodes.Add(node);
+            }
+        }
     }
 
     internal void UnregisterNode(Node node)
@@ -319,7 +380,11 @@ public sealed class Context : IDisposable
     private void DisposeTrackedNodes()
     {
         Node[] snapshot;
-        lock (_nodesLock) snapshot = _nodes.ToArray();
+        lock (_nodesLock)
+        {
+            snapshot = _nodes.ToArray();
+            _nodes.Clear();
+        }
         foreach (var node in snapshot)
         {
             try { node.Dispose(); }

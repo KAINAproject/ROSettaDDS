@@ -1150,12 +1150,245 @@ public class NodeTests
         }
     }
 
+    // ======== Fix 2: Dispose cleanup continuation ========
+
+    [Fact]
+    public void Disposeで先頭wrapper例外でも後続wrapperが処理される()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "cleanup_test");
+
+        using var pub1 = node.CreatePublisher<StringMessage>(
+            "topic1", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var pub2 = node.CreatePublisher<StringMessage>(
+            "topic2", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+
+        var wrappersField = typeof(Node).GetField("_trackedWrappers",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var wrappers = (List<IDisposable>)wrappersField.GetValue(node)!;
+        wrappers.Insert(0, new ThrowingDisposable());
+        int originalCount = wrappers.Count;
+
+        Exception? disposeEx = null;
+        try { node.Dispose(); }
+        catch (Exception ex) { disposeEx = ex; }
+
+        Assert.NotNull(disposeEx);
+        Assert.IsType<InvalidOperationException>(disposeEx);
+        Assert.True(node.IsDisposed);
+
+        var remaining = (List<IDisposable>)wrappersField.GetValue(node)!;
+        Assert.Empty(remaining);
+    }
+
+    [Fact]
+    public void Disposeで複数endpointのcleanupがすべて実行される()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "multi_endpoint_cleanup_test");
+
+        using var pub1 = node.CreatePublisher<StringMessage>(
+            "topic1", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var pub2 = node.CreatePublisher<StringMessage>(
+            "topic2", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var sub1 = node.CreateSubscription<StringMessage>(
+            "topic3", StringMessageSerializer.Instance, _ => { });
+
+        var snapshotBefore = node.Snapshot();
+        Assert.Equal(2, snapshotBefore.Writers.Length);
+        Assert.Single(snapshotBefore.Readers);
+
+        Exception? disposeEx = null;
+        try { node.Dispose(); }
+        catch (Exception ex) { disposeEx = ex; }
+
+        Assert.True(node.IsDisposed);
+
+        var snapshotAfter = node.Snapshot();
+        Assert.Empty(snapshotAfter.Writers);
+        Assert.Empty(snapshotAfter.Readers);
+    }
+
+    // ======== Fix 3: ServiceClient lifecycle ========
+
+    [Fact]
+    public async Task ServiceClient_Dispose後にObjectDisposedException()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        using var node = new Node(ctx, "svc_lifecycle");
+
+        var svcName = $"test_{System.Guid.NewGuid():N}";
+        var descriptor = new ServiceDescriptor<StringMessage, StringMessage>(
+            requestDdsTypeName: StringMessage.DdsTypeName,
+            responseDdsTypeName: StringMessage.DdsTypeName,
+            requestSerializer: StringMessageSerializer.Instance,
+            responseSerializer: StringMessageSerializer.Instance);
+
+        var client = node.CreateServiceClient(descriptor, svcName);
+
+        var cts = new CancellationTokenSource();
+        var waitTask = client.WaitForServiceAsync(TimeSpan.FromSeconds(10), cts.Token);
+
+        await Task.Delay(50);
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waitTask);
+
+        client.Dispose();
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            client.CallAsync(new StringMessage("after"), TimeSpan.FromMilliseconds(1)));
+    }
+
+    [Fact]
+    public async Task ServiceClient_WaitForServiceAsync_Dispose済みならObjectDisposedException()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        using var node = new Node(ctx, "svc_wait_disposed");
+
+        var svcName = $"test_{System.Guid.NewGuid():N}";
+        var descriptor = new ServiceDescriptor<StringMessage, StringMessage>(
+            requestDdsTypeName: StringMessage.DdsTypeName,
+            responseDdsTypeName: StringMessage.DdsTypeName,
+            requestSerializer: StringMessageSerializer.Instance,
+            responseSerializer: StringMessageSerializer.Instance);
+
+        var client = node.CreateServiceClient(descriptor, svcName);
+        client.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            client.WaitForServiceAsync(TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task ServiceClient_WaitForServiceAsync_待機中にDisposeでObjectDisposedException()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        using var node = new Node(ctx, "svc_wait_dispose_race");
+
+        var svcName = $"test_{System.Guid.NewGuid():N}";
+        var descriptor = new ServiceDescriptor<StringMessage, StringMessage>(
+            requestDdsTypeName: StringMessage.DdsTypeName,
+            responseDdsTypeName: StringMessage.DdsTypeName,
+            requestSerializer: StringMessageSerializer.Instance,
+            responseSerializer: StringMessageSerializer.Instance);
+
+        var client = node.CreateServiceClient(descriptor, svcName);
+
+        var waitLoopEntered = new ManualResetEventSlim();
+        client.WaitLoopEntered = () => waitLoopEntered.Set();
+
+        var gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var delayInvoked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        client.WaitDelayAsync = (delay, ct) =>
+        {
+            delayInvoked.TrySetResult(true);
+            return gate.Task.WaitAsync(ct);
+        };
+
+        var waitTask = Task.Run(async () =>
+        {
+            return await client.WaitForServiceAsync(TimeSpan.FromSeconds(30));
+        });
+
+        try
+        {
+            Assert.True(waitLoopEntered.Wait(TimeSpan.FromSeconds(5)),
+                "WaitForServiceAsync should enter the wait loop");
+            Assert.True(await delayInvoked.Task.WaitAsync(TimeSpan.FromSeconds(5)),
+                "WaitDelayAsync should be invoked");
+
+            client.Dispose();
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(
+                () => waitTask.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            gate.TrySetResult(true);
+        }
+    }
+
+    [Theory]
+    [InlineData("BeforeWriterStop")]
+    [InlineData("BeforeWriterUnregister")]
+    [InlineData("BeforeWriterDispose")]
+    [InlineData("BeforeReaderStop")]
+    [InlineData("BeforeReaderUnregister")]
+    [InlineData("BeforeReaderDispose")]
+    public void Node_Dispose_各cleanup操作のfault_injection_で後続cleanupとUnregisterNodeが継続する(string faultEvent)
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "cleanup_fault_" + faultEvent);
+
+        node.CreatePublisher<StringMessage>("topic_a", StringMessageSerializer.Instance);
+        node.CreatePublisher<StringMessage>("topic_b", StringMessageSerializer.Instance);
+        node.CreateSubscription<StringMessage>("topic_r", StringMessageSerializer.Instance, (_, _) => { });
+
+        var wrappersField = typeof(Node).GetField("_trackedWrappers",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var wrappers = (List<IDisposable>)wrappersField.GetValue(node)!;
+        wrappers.Clear();
+
+        var events = new ConcurrentBag<string>();
+        node.TestEventRecorder = eventName => events.Add(eventName);
+
+        var faultInjected = false;
+        node.EndpointCleanupFaultInjector = eventName =>
+        {
+            if (!faultInjected && eventName == faultEvent)
+            {
+                faultInjected = true;
+                throw new InvalidOperationException($"injected fault at {faultEvent}");
+            }
+        };
+
+        Exception? caughtEx = null;
+        try { node.Dispose(); }
+        catch (Exception ex) { caughtEx = ex; }
+
+        Assert.NotNull(caughtEx);
+        Assert.IsType<InvalidOperationException>(caughtEx);
+        Assert.Equal($"injected fault at {faultEvent}", caughtEx.Message);
+        Assert.True(node.IsDisposed);
+
+        var eventList = events.ToList();
+        eventList.Should().Contain("BeforeUnregisterNode",
+            $"Context.UnregisterNode must be reached even after fault at {faultEvent}");
+        eventList.Should().Contain("AfterUnregisterNode",
+            $"Context.UnregisterNode must complete even after fault at {faultEvent}");
+
+        var writerStopCount = eventList.Count(e => e == "BeforeWriterStop");
+        writerStopCount.Should().Be(2, "both writers must attempt Stop");
+
+        var writerUnregisterCount = eventList.Count(e => e == "BeforeWriterUnregister");
+        writerUnregisterCount.Should().Be(2, "both writers must attempt Unregister");
+
+        var writerDisposeCount = eventList.Count(e => e == "BeforeWriterDispose");
+        writerDisposeCount.Should().Be(2, "both writers must attempt Dispose");
+
+        eventList.Should().Contain("BeforeReaderStop", "reader Stop must be attempted");
+        eventList.Should().Contain("BeforeReaderUnregister", "reader Unregister must be attempted");
+        eventList.Should().Contain("BeforeReaderDispose", "reader Dispose must be attempted");
+    }
+
     private static int GetPendingRegistrationsField(Node node)
     {
         var field = typeof(Node).GetField("_pendingRegistrations",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
         return (int)field!.GetValue(node)!;
     }
+
+    private sealed class ThrowingDisposable : IDisposable
+    {
+        public void Dispose() => throw new InvalidOperationException("test throw");
+    }
+
     private sealed class SilentTransport : IRtpsTransport
     {
         public Locator LocalLocator => Locator.FromUdpV4(IPAddress.Loopback, 7411);

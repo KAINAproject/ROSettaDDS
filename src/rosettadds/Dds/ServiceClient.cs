@@ -25,8 +25,12 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     private readonly Action<Guid, IUserReader>? _unregisterReplyEndpoint;
     internal Action? RemoveFromTracker { get; set; }
     private int _disposed;
+    private readonly CancellationTokenSource _disposeCts = new();
     private Task? _replyReaderAdvertiseTask;
     private readonly ManualResetEventSlim _disposeCompleted = new();
+
+    internal Action? WaitLoopEntered { get; set; }
+    internal Func<TimeSpan, CancellationToken, Task>? WaitDelayAsync { get; set; }
 
     /// <summary>request writer の RTPS GUID。相関キーの writer 部に使う。</summary>
     public Guid RequestWriterGuid => _requestPublisher.Guid;
@@ -51,16 +55,37 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     /// <summary>マッチするサービスサーバ (rq reader と rr writer) が見つかるまで待つ。</summary>
     public async Task<bool> WaitForServiceAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
         var deadline = DateTime.UtcNow + timeout;
+        bool loopEntered = false;
         while (DateTime.UtcNow < deadline)
         {
+            if (!loopEntered)
+            {
+                loopEntered = true;
+                WaitLoopEntered?.Invoke();
+            }
+            ThrowIfDisposed();
             if (IsServiceReady())
             {
+                ThrowIfDisposed();
                 return true;
             }
-            cancellationToken.ThrowIfCancellationRequested();
-            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                linkedCts.Token.ThrowIfCancellationRequested();
+                var delayTask = WaitDelayAsync is not null
+                    ? WaitDelayAsync(TimeSpan.FromMilliseconds(20), linkedCts.Token)
+                    : Task.Delay(TimeSpan.FromMilliseconds(20), linkedCts.Token);
+                await delayTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested)
+            {
+                throw new ObjectDisposedException(GetType().Name);
+            }
         }
+        ThrowIfDisposed();
         return IsServiceReady();
     }
 
@@ -186,6 +211,8 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
             return;
         }
 
+        _disposeCts.Cancel();
+
         try
         {
             _replyReader.SampleReceived -= OnReplyReceived;
@@ -215,6 +242,7 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
         }
         finally
         {
+            _disposeCts.Dispose();
             _disposeCompleted.Set();
         }
     }

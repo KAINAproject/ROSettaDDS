@@ -29,7 +29,7 @@ public sealed class Node : IDisposable
     private readonly object _diagnosticsLock = new();
     private readonly object _disposeGate = new();
     private readonly ManualResetEventSlim _disposeCompletedGate = new();
-    private Exception? _disposeException;
+    private System.Runtime.ExceptionServices.ExceptionDispatchInfo? _disposeException;
 
     internal Action? BeforeDisposedCheckCallback { get; set; }
     internal Action<int>? PendingRegistrationsWaitLoopEntered { get; set; }
@@ -37,6 +37,8 @@ public sealed class Node : IDisposable
     internal Action? BeforeCreateStartCallback { get; set; }
     internal Action<string>? TestEventRecorder { get; set; }
     internal Action? AfterWrapperTracked { get; set; }
+    internal Action<string>? EndpointCleanupFaultInjector { get; set; }
+    internal Func<IDisposable, string, bool>? WrapperDisposeFaultInjector { get; set; }
 
     internal int TrackedWrapperCount
     {
@@ -486,9 +488,7 @@ public sealed class Node : IDisposable
             _disposeCompletedGate.Wait();
             if (_disposeException is not null)
             {
-                throw new AggregateException(
-                    "Node.Dispose failed on the first call and is propagated here.",
-                    _disposeException);
+                _disposeException.Throw();
             }
             return;
         }
@@ -511,14 +511,22 @@ public sealed class Node : IDisposable
             TestEventRecorder?.Invoke("NodeDisposeDiagnosticsStart");
             TopicDiagnostics[] diagnostics;
             lock (_diagnosticsLock) diagnostics = _trackedDiagnostics.ToArray();
-            foreach (var d in diagnostics) d.Dispose();
+            foreach (var d in diagnostics)
+            {
+                try { d.Dispose(); }
+                catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            }
             lock (_diagnosticsLock) _trackedDiagnostics.Clear();
             TestEventRecorder?.Invoke("NodeDisposeDiagnosticsEnd");
 
             TestEventRecorder?.Invoke("NodeDisposeWrappersStart");
             IDisposable[] wrappers;
             lock (_wrappersLock) wrappers = _trackedWrappers.ToArray();
-            foreach (var w in wrappers) w.Dispose();
+            foreach (var w in wrappers)
+            {
+                try { w.Dispose(); }
+                catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            }
             lock (_wrappersLock) _trackedWrappers.Clear();
             TestEventRecorder?.Invoke("NodeDisposeWrappersEnd");
 
@@ -529,20 +537,29 @@ public sealed class Node : IDisposable
             }
             TestEventRecorder?.Invoke("NodeDisposeEndpointsEnd");
 
-            if (_discovery is not null)
+            try
             {
-                _discovery.ReaderDiscovered -= OnRemoteReaderDiscovered;
-                _discovery.WriterDiscovered -= OnRemoteWriterDiscovered;
-                _discovery.EndpointUpdated -= OnRemoteEndpointUpdated;
-                _discovery.ReaderLost -= OnRemoteReaderLost;
-                _discovery.WriterLost -= OnRemoteWriterLost;
+                if (_discovery is not null)
+                {
+                    _discovery.ReaderDiscovered -= OnRemoteReaderDiscovered;
+                    _discovery.WriterDiscovered -= OnRemoteWriterDiscovered;
+                    _discovery.EndpointUpdated -= OnRemoteEndpointUpdated;
+                    _discovery.ReaderLost -= OnRemoteReaderLost;
+                    _discovery.WriterLost -= OnRemoteWriterLost;
+                }
             }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
 
-            Context.UnregisterNode(this);
+            TestEventRecorder?.Invoke("BeforeUnregisterNode");
+            try { Context.UnregisterNode(this); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            TestEventRecorder?.Invoke("AfterUnregisterNode");
+
+            _disposeException?.Throw();
         }
         catch (Exception ex)
         {
-            _disposeException = ex;
+            _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
             throw;
         }
         finally
@@ -554,18 +571,61 @@ public sealed class Node : IDisposable
     private void UnregisterAllLocalEndpoints()
     {
         var endpoints = _userEndpoints.Snapshot();
+        
         foreach (var writer in endpoints.Writers)
         {
-            writer.Stop();
-            UnregisterLocalWriter(writer.Guid, writer);
-            writer.Dispose();
+            try
+            {
+                TestEventRecorder?.Invoke("BeforeWriterStop");
+                EndpointCleanupFaultInjector?.Invoke("BeforeWriterStop");
+                writer.Stop();
+            }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try
+            {
+                TestEventRecorder?.Invoke("BeforeWriterUnregister");
+                EndpointCleanupFaultInjector?.Invoke("BeforeWriterUnregister");
+                UnregisterLocalWriter(writer.Guid, writer);
+            }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try
+            {
+                TestEventRecorder?.Invoke("BeforeWriterDispose");
+                EndpointCleanupFaultInjector?.Invoke("BeforeWriterDispose");
+                writer.Dispose();
+            }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
+        
         foreach (var reader in endpoints.Readers)
         {
             var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
-            reader.Stop();
-            UnregisterLocalReader(readerGuid, reader);
-            reader.Dispose();
+            
+            try
+            {
+                TestEventRecorder?.Invoke("BeforeReaderStop");
+                EndpointCleanupFaultInjector?.Invoke("BeforeReaderStop");
+                reader.Stop();
+            }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try
+            {
+                TestEventRecorder?.Invoke("BeforeReaderUnregister");
+                EndpointCleanupFaultInjector?.Invoke("BeforeReaderUnregister");
+                UnregisterLocalReader(readerGuid, reader);
+            }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try
+            {
+                TestEventRecorder?.Invoke("BeforeReaderDispose");
+                EndpointCleanupFaultInjector?.Invoke("BeforeReaderDispose");
+                reader.Dispose();
+            }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
     }
 

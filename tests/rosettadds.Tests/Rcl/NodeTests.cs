@@ -1296,15 +1296,22 @@ public class NodeTests
             () => waitTask.WaitAsync(TimeSpan.FromSeconds(2)));
     }
 
-    [Fact]
-    public void Node_Dispose_でEndpointCleanupFaultInjectorがStopでthrowしても後続cleanupは継続する()
+    [Theory]
+    [InlineData("BeforeWriterStop")]
+    [InlineData("BeforeWriterUnregister")]
+    [InlineData("BeforeWriterDispose")]
+    [InlineData("BeforeReaderStop")]
+    [InlineData("BeforeReaderUnregister")]
+    [InlineData("BeforeReaderDispose")]
+    public void Node_Dispose_各cleanup操作のfault_injection_で後続cleanupとUnregisterNodeが継続する(string faultEvent)
     {
         using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
         ctx.Start();
-        var node = new Node(ctx, "endpoint_cleanup_fault");
+        var node = new Node(ctx, "cleanup_fault_" + faultEvent);
 
-        var pub1 = node.CreatePublisher<StringMessage>("topic1", StringMessageSerializer.Instance);
-        var pub2 = node.CreatePublisher<StringMessage>("topic2", StringMessageSerializer.Instance);
+        node.CreatePublisher<StringMessage>("topic_a", StringMessageSerializer.Instance);
+        node.CreatePublisher<StringMessage>("topic_b", StringMessageSerializer.Instance);
+        node.CreateSubscription<StringMessage>("topic_r", StringMessageSerializer.Instance, (_, _) => { });
 
         var wrappersField = typeof(Node).GetField("_trackedWrappers",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
@@ -1312,38 +1319,45 @@ public class NodeTests
         wrappers.Clear();
 
         var events = new ConcurrentBag<string>();
-        var firstStop = true;
+        node.TestEventRecorder = eventName => events.Add(eventName);
+
+        var faultInjected = false;
         node.EndpointCleanupFaultInjector = eventName =>
         {
-            events.Add(eventName);
-            if (firstStop && eventName == "BeforeWriterStop")
+            if (!faultInjected && eventName == faultEvent)
             {
-                firstStop = false;
-                throw new InvalidOperationException("injected Stop failure");
+                faultInjected = true;
+                throw new InvalidOperationException($"injected fault at {faultEvent}");
             }
         };
 
         Exception? caughtEx = null;
-        try
-        {
-            node.Dispose();
-        }
-        catch (Exception ex)
-        {
-            caughtEx = ex;
-        }
+        try { node.Dispose(); }
+        catch (Exception ex) { caughtEx = ex; }
 
         Assert.NotNull(caughtEx);
         Assert.IsType<InvalidOperationException>(caughtEx);
-        Assert.Equal("injected Stop failure", caughtEx.Message);
+        Assert.Equal($"injected fault at {faultEvent}", caughtEx.Message);
+        Assert.True(node.IsDisposed);
 
         var eventList = events.ToList();
-        eventList.Should().NotBeEmpty("fault injector should have been called");
-        eventList.Should().Contain("BeforeWriterStop");
-        eventList.Should().Contain("BeforeWriterUnregister");
-        eventList.Should().Contain("BeforeWriterDispose");
-        var writerStopIndices = eventList.Select((e, i) => (e, i)).Where(x => x.e == "BeforeWriterStop").Select(x => x.i).ToList();
-        writerStopIndices.Count.Should().BeGreaterOrEqualTo(2);
+        eventList.Should().Contain("BeforeUnregisterNode",
+            $"Context.UnregisterNode must be reached even after fault at {faultEvent}");
+        eventList.Should().Contain("AfterUnregisterNode",
+            $"Context.UnregisterNode must complete even after fault at {faultEvent}");
+
+        var writerStopCount = eventList.Count(e => e == "BeforeWriterStop");
+        writerStopCount.Should().Be(2, "both writers must attempt Stop");
+
+        var writerUnregisterCount = eventList.Count(e => e == "BeforeWriterUnregister");
+        writerUnregisterCount.Should().Be(2, "both writers must attempt Unregister");
+
+        var writerDisposeCount = eventList.Count(e => e == "BeforeWriterDispose");
+        writerDisposeCount.Should().Be(2, "both writers must attempt Dispose");
+
+        eventList.Should().Contain("BeforeReaderStop", "reader Stop must be attempted");
+        eventList.Should().Contain("BeforeReaderUnregister", "reader Unregister must be attempted");
+        eventList.Should().Contain("BeforeReaderDispose", "reader Dispose must be attempted");
     }
 
     private static int GetPendingRegistrationsField(Node node)

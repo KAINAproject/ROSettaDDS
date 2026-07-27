@@ -550,8 +550,10 @@ public sealed class Node : IDisposable
             }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
 
+            TestEventRecorder?.Invoke("BeforeUnregisterNode");
             try { Context.UnregisterNode(this); }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            TestEventRecorder?.Invoke("AfterUnregisterNode");
 
             _disposeException?.Throw();
         }
@@ -574,6 +576,7 @@ public sealed class Node : IDisposable
         {
             try
             {
+                TestEventRecorder?.Invoke("BeforeWriterStop");
                 EndpointCleanupFaultInjector?.Invoke("BeforeWriterStop");
                 writer.Stop();
             }
@@ -581,6 +584,7 @@ public sealed class Node : IDisposable
             
             try
             {
+                TestEventRecorder?.Invoke("BeforeWriterUnregister");
                 EndpointCleanupFaultInjector?.Invoke("BeforeWriterUnregister");
                 UnregisterLocalWriter(writer.Guid, writer);
             }
@@ -588,6 +592,7 @@ public sealed class Node : IDisposable
             
             try
             {
+                TestEventRecorder?.Invoke("BeforeWriterDispose");
                 EndpointCleanupFaultInjector?.Invoke("BeforeWriterDispose");
                 writer.Dispose();
             }
@@ -600,6 +605,7 @@ public sealed class Node : IDisposable
             
             try
             {
+                TestEventRecorder?.Invoke("BeforeReaderStop");
                 EndpointCleanupFaultInjector?.Invoke("BeforeReaderStop");
                 reader.Stop();
             }
@@ -607,6 +613,7 @@ public sealed class Node : IDisposable
             
             try
             {
+                TestEventRecorder?.Invoke("BeforeReaderUnregister");
                 EndpointCleanupFaultInjector?.Invoke("BeforeReaderUnregister");
                 UnregisterLocalReader(readerGuid, reader);
             }
@@ -614,6 +621,7 @@ public sealed class Node : IDisposable
             
             try
             {
+                TestEventRecorder?.Invoke("BeforeReaderDispose");
                 EndpointCleanupFaultInjector?.Invoke("BeforeReaderDispose");
                 reader.Dispose();
             }

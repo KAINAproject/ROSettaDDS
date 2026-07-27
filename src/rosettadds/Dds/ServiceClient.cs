@@ -29,6 +29,8 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     private Task? _replyReaderAdvertiseTask;
     private readonly ManualResetEventSlim _disposeCompleted = new();
 
+    internal Action? WaitLoopEntered { get; set; }
+
     /// <summary>request writer の RTPS GUID。相関キーの writer 部に使う。</summary>
     public Guid RequestWriterGuid => _requestPublisher.Guid;
 
@@ -55,17 +57,23 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
         ThrowIfDisposed();
         using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
         var deadline = DateTime.UtcNow + timeout;
+        bool loopEntered = false;
         while (DateTime.UtcNow < deadline)
         {
+            if (!loopEntered)
+            {
+                loopEntered = true;
+                WaitLoopEntered?.Invoke();
+            }
             ThrowIfDisposed();
             if (IsServiceReady())
             {
                 ThrowIfDisposed();
                 return true;
             }
-            linkedCts.Token.ThrowIfCancellationRequested();
             try
             {
+                linkedCts.Token.ThrowIfCancellationRequested();
                 await Task.Delay(20, linkedCts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested)

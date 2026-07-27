@@ -245,14 +245,22 @@ public class ContextTests
         ctx.Start();
         var blocker = new Node(ctx, "blocker");
 
-        var disposeInProgressReached = new ManualResetEventSlim();
-        ctx.DisposeInProgressCallback = () => disposeInProgressReached.Set();
+        var callbackReached = new ManualResetEventSlim();
+        var pauseGate = new ManualResetEventSlim();
+        ctx.DisposeInProgressCallback = () =>
+        {
+            callbackReached.Set();
+            pauseGate.Wait(TimeSpan.FromSeconds(10));
+        };
 
         var disposeThread = new Thread(() => ctx.Dispose());
         disposeThread.Start();
 
-        Assert.True(disposeInProgressReached.Wait(TimeSpan.FromSeconds(5)),
-            "Dispose should reach _disposeInProgress state");
+        Assert.True(callbackReached.Wait(TimeSpan.FromSeconds(5)),
+            "Dispose should reach DisposeInProgressCallback");
+
+        Assert.False(disposeThread.Join(TimeSpan.FromMilliseconds(100)),
+            "Dispose thread should be paused at gate");
 
         Exception? registerError = null;
         var lateNodeThread = new Thread(() =>
@@ -267,7 +275,10 @@ public class ContextTests
         Assert.NotNull(registerError);
         Assert.IsType<ObjectDisposedException>(registerError);
 
-        Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)));
+        pauseGate.Set();
+
+        Assert.True(disposeThread.Join(TimeSpan.FromSeconds(5)),
+            "Dispose thread should complete after gate release");
         Assert.True(ctx.IsDisposed);
     }
 

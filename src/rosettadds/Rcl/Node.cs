@@ -572,16 +572,25 @@ public sealed class Node : IDisposable
         
         foreach (var writer in endpoints.Writers)
         {
-            EndpointCleanupFaultInjector?.Invoke("BeforeWriterStop");
-            try { writer.Stop(); }
+            try
+            {
+                EndpointCleanupFaultInjector?.Invoke("BeforeWriterStop");
+                writer.Stop();
+            }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
-            EndpointCleanupFaultInjector?.Invoke("BeforeWriterUnregister");
-            try { UnregisterLocalWriter(writer.Guid, writer); }
+            try
+            {
+                EndpointCleanupFaultInjector?.Invoke("BeforeWriterUnregister");
+                UnregisterLocalWriter(writer.Guid, writer);
+            }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
-            EndpointCleanupFaultInjector?.Invoke("BeforeWriterDispose");
-            try { writer.Dispose(); }
+            try
+            {
+                EndpointCleanupFaultInjector?.Invoke("BeforeWriterDispose");
+                writer.Dispose();
+            }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
         
@@ -589,16 +598,25 @@ public sealed class Node : IDisposable
         {
             var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
             
-            EndpointCleanupFaultInjector?.Invoke("BeforeReaderStop");
-            try { reader.Stop(); }
+            try
+            {
+                EndpointCleanupFaultInjector?.Invoke("BeforeReaderStop");
+                reader.Stop();
+            }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
-            EndpointCleanupFaultInjector?.Invoke("BeforeReaderUnregister");
-            try { UnregisterLocalReader(readerGuid, reader); }
+            try
+            {
+                EndpointCleanupFaultInjector?.Invoke("BeforeReaderUnregister");
+                UnregisterLocalReader(readerGuid, reader);
+            }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             
-            EndpointCleanupFaultInjector?.Invoke("BeforeReaderDispose");
-            try { reader.Dispose(); }
+            try
+            {
+                EndpointCleanupFaultInjector?.Invoke("BeforeReaderDispose");
+                reader.Dispose();
+            }
             catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
     }

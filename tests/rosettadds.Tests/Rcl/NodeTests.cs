@@ -1279,15 +1279,16 @@ public class NodeTests
 
         var client = node.CreateServiceClient(descriptor, svcName);
 
-        var waitEntered = new ManualResetEventSlim();
+        var waitLoopEntered = new ManualResetEventSlim();
+        client.WaitLoopEntered = () => waitLoopEntered.Set();
+
         var waitTask = Task.Run(async () =>
         {
-            waitEntered.Set();
             return await client.WaitForServiceAsync(TimeSpan.FromSeconds(30));
         });
 
-        Assert.True(waitEntered.Wait(TimeSpan.FromSeconds(5)));
-        await Task.Delay(100);
+        Assert.True(waitLoopEntered.Wait(TimeSpan.FromSeconds(5)),
+            "WaitForServiceAsync should enter the wait loop");
 
         client.Dispose();
 
@@ -1296,7 +1297,7 @@ public class NodeTests
     }
 
     [Fact]
-    public void Node_Dispose_で先頭endpointのStopがthrowしても後続cleanupは継続する()
+    public void Node_Dispose_でEndpointCleanupFaultInjectorがStopでthrowしても後続cleanupは継続する()
     {
         using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
         ctx.Start();
@@ -1305,18 +1306,22 @@ public class NodeTests
         var pub1 = node.CreatePublisher<StringMessage>("topic1", StringMessageSerializer.Instance);
         var pub2 = node.CreatePublisher<StringMessage>("topic2", StringMessageSerializer.Instance);
 
+        var wrappersField = typeof(Node).GetField("_trackedWrappers",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var wrappers = (List<IDisposable>)wrappersField.GetValue(node)!;
+        wrappers.Clear();
+
         var events = new ConcurrentBag<string>();
         var firstStop = true;
-        pub1.DisposeFaultInjector = eventName =>
+        node.EndpointCleanupFaultInjector = eventName =>
         {
-            events.Add($"pub1:{eventName}");
-            if (firstStop && eventName == "BeforeStop")
+            events.Add(eventName);
+            if (firstStop && eventName == "BeforeWriterStop")
             {
                 firstStop = false;
                 throw new InvalidOperationException("injected Stop failure");
             }
         };
-        pub2.DisposeFaultInjector = eventName => events.Add($"pub2:{eventName}");
 
         Exception? caughtEx = null;
         try
@@ -1333,12 +1338,12 @@ public class NodeTests
         Assert.Equal("injected Stop failure", caughtEx.Message);
 
         var eventList = events.ToList();
-        eventList.Should().Contain("pub1:BeforeStop");
-        eventList.Should().Contain("pub1:BeforeUnregister");
-        eventList.Should().Contain("pub1:BeforeWriterDispose");
-        eventList.Should().Contain("pub2:BeforeStop");
-        eventList.Should().Contain("pub2:BeforeUnregister");
-        eventList.Should().Contain("pub2:BeforeWriterDispose");
+        eventList.Should().NotBeEmpty("fault injector should have been called");
+        eventList.Should().Contain("BeforeWriterStop");
+        eventList.Should().Contain("BeforeWriterUnregister");
+        eventList.Should().Contain("BeforeWriterDispose");
+        var writerStopIndices = eventList.Select((e, i) => (e, i)).Where(x => x.e == "BeforeWriterStop").Select(x => x.i).ToList();
+        writerStopIndices.Count.Should().BeGreaterOrEqualTo(2);
     }
 
     private static int GetPendingRegistrationsField(Node node)

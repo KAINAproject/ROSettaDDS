@@ -29,7 +29,7 @@ public sealed class Node : IDisposable
     private readonly object _diagnosticsLock = new();
     private readonly object _disposeGate = new();
     private readonly ManualResetEventSlim _disposeCompletedGate = new();
-    private Exception? _disposeException;
+    private System.Runtime.ExceptionServices.ExceptionDispatchInfo? _disposeException;
 
     internal Action? BeforeDisposedCheckCallback { get; set; }
     internal Action<int>? PendingRegistrationsWaitLoopEntered { get; set; }
@@ -486,9 +486,7 @@ public sealed class Node : IDisposable
             _disposeCompletedGate.Wait();
             if (_disposeException is not null)
             {
-                throw new AggregateException(
-                    "Node.Dispose failed on the first call and is propagated here.",
-                    _disposeException);
+                _disposeException.Throw();
             }
             return;
         }
@@ -514,7 +512,7 @@ public sealed class Node : IDisposable
             foreach (var d in diagnostics)
             {
                 try { d.Dispose(); }
-                catch (Exception ex) { _disposeException ??= ex; }
+                catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             }
             lock (_diagnosticsLock) _trackedDiagnostics.Clear();
             TestEventRecorder?.Invoke("NodeDisposeDiagnosticsEnd");
@@ -525,7 +523,7 @@ public sealed class Node : IDisposable
             foreach (var w in wrappers)
             {
                 try { w.Dispose(); }
-                catch (Exception ex) { _disposeException ??= ex; }
+                catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
             }
             lock (_wrappersLock) _trackedWrappers.Clear();
             TestEventRecorder?.Invoke("NodeDisposeWrappersEnd");
@@ -548,17 +546,16 @@ public sealed class Node : IDisposable
                     _discovery.WriterLost -= OnRemoteWriterLost;
                 }
             }
-            catch (Exception ex) { _disposeException ??= ex; }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
 
             try { Context.UnregisterNode(this); }
-            catch (Exception ex) { _disposeException ??= ex; }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
 
-            if (_disposeException is not null)
-                throw _disposeException;
+            _disposeException?.Throw();
         }
         catch (Exception ex)
         {
-            _disposeException ??= ex;
+            _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
             throw;
         }
         finally
@@ -570,26 +567,31 @@ public sealed class Node : IDisposable
     private void UnregisterAllLocalEndpoints()
     {
         var endpoints = _userEndpoints.Snapshot();
+        
         foreach (var writer in endpoints.Writers)
         {
-            try
-            {
-                writer.Stop();
-                UnregisterLocalWriter(writer.Guid, writer);
-                writer.Dispose();
-            }
-            catch (Exception ex) { _disposeException ??= ex; }
+            try { writer.Stop(); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try { UnregisterLocalWriter(writer.Guid, writer); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try { writer.Dispose(); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
+        
         foreach (var reader in endpoints.Readers)
         {
-            try
-            {
-                var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
-                reader.Stop();
-                UnregisterLocalReader(readerGuid, reader);
-                reader.Dispose();
-            }
-            catch (Exception ex) { _disposeException ??= ex; }
+            var readerGuid = new Guid(Context.GuidPrefix, reader.ReaderEntityId);
+            
+            try { reader.Stop(); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try { UnregisterLocalReader(readerGuid, reader); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+            
+            try { reader.Dispose(); }
+            catch (Exception ex) { _disposeException ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
         }
     }
 

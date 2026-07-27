@@ -1182,6 +1182,35 @@ public class NodeTests
         Assert.Empty(remaining);
     }
 
+    [Fact]
+    public void Disposeで複数endpointのcleanupがすべて実行される()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        var node = new Node(ctx, "multi_endpoint_cleanup_test");
+
+        using var pub1 = node.CreatePublisher<StringMessage>(
+            "topic1", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var pub2 = node.CreatePublisher<StringMessage>(
+            "topic2", StringMessageSerializer.Instance, StringMessage.DdsTypeName);
+        using var sub1 = node.CreateSubscription<StringMessage>(
+            "topic3", StringMessageSerializer.Instance, _ => { });
+
+        var snapshotBefore = node.Snapshot();
+        Assert.Equal(2, snapshotBefore.Writers.Length);
+        Assert.Single(snapshotBefore.Readers);
+
+        Exception? disposeEx = null;
+        try { node.Dispose(); }
+        catch (Exception ex) { disposeEx = ex; }
+
+        Assert.True(node.IsDisposed);
+
+        var snapshotAfter = node.Snapshot();
+        Assert.Empty(snapshotAfter.Writers);
+        Assert.Empty(snapshotAfter.Readers);
+    }
+
     // ======== Fix 3: ServiceClient lifecycle ========
 
     [Fact]
@@ -1211,6 +1240,62 @@ public class NodeTests
         client.Dispose();
         await Assert.ThrowsAsync<ObjectDisposedException>(() =>
             client.CallAsync(new StringMessage("after"), TimeSpan.FromMilliseconds(1)));
+    }
+
+    [Fact]
+    public async Task ServiceClient_WaitForServiceAsync_Dispose済みならObjectDisposedException()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        using var node = new Node(ctx, "svc_wait_disposed");
+
+        var svcName = $"test_{System.Guid.NewGuid():N}";
+        var descriptor = new ServiceDescriptor<StringMessage, StringMessage>(
+            requestDdsTypeName: StringMessage.DdsTypeName,
+            responseDdsTypeName: StringMessage.DdsTypeName,
+            requestSerializer: StringMessageSerializer.Instance,
+            responseSerializer: StringMessageSerializer.Instance);
+
+        var client = node.CreateServiceClient(descriptor, svcName);
+        client.Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(() =>
+            client.WaitForServiceAsync(TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task ServiceClient_WaitForServiceAsync_待機中にDisposeで即座に解除()
+    {
+        using var ctx = new Context(new ContextOptions { LocalhostOnly = true, Logger = NullLogger.Instance });
+        ctx.Start();
+        using var node = new Node(ctx, "svc_wait_dispose_race");
+
+        var svcName = $"test_{System.Guid.NewGuid():N}";
+        var descriptor = new ServiceDescriptor<StringMessage, StringMessage>(
+            requestDdsTypeName: StringMessage.DdsTypeName,
+            responseDdsTypeName: StringMessage.DdsTypeName,
+            requestSerializer: StringMessageSerializer.Instance,
+            responseSerializer: StringMessageSerializer.Instance);
+
+        var client = node.CreateServiceClient(descriptor, svcName);
+
+        var waitStarted = new ManualResetEventSlim();
+        var waitTask = Task.Run(async () =>
+        {
+            waitStarted.Set();
+            return await client.WaitForServiceAsync(TimeSpan.FromSeconds(10));
+        });
+
+        Assert.True(waitStarted.Wait(TimeSpan.FromSeconds(5)));
+        await Task.Delay(100);
+
+        var disposeTask = Task.Run(() => client.Dispose());
+
+        var completed = await Task.WhenAny(waitTask, disposeTask, Task.Delay(TimeSpan.FromSeconds(2)));
+        Assert.True(completed != Task.Delay(TimeSpan.FromSeconds(2)),
+            "WaitForServiceAsync or Dispose should complete within 2 seconds");
+
+        await Task.WhenAll(waitTask.ContinueWith(_ => { }), disposeTask);
     }
 
     private static int GetPendingRegistrationsField(Node node)

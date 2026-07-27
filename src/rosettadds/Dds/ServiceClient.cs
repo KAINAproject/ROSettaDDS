@@ -51,16 +51,26 @@ public sealed class ServiceClient<TRequest, TResponse> : IDisposable
     /// <summary>マッチするサービスサーバ (rq reader と rr writer) が見つかるまで待つ。</summary>
     public async Task<bool> WaitForServiceAsync(TimeSpan timeout, CancellationToken cancellationToken = default)
     {
+        ThrowIfDisposed();
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
+            ThrowIfDisposed();
             if (IsServiceReady())
             {
                 return true;
             }
             cancellationToken.ThrowIfCancellationRequested();
-            await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await Task.Delay(20, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                throw;
+            }
         }
+        ThrowIfDisposed();
         return IsServiceReady();
     }
 

@@ -44,7 +44,7 @@ public sealed class Context : IDisposable
     private bool _disposeInProgress;
     private readonly object _disposeGate = new();
     private readonly ManualResetEventSlim _disposeCompletedGate = new();
-    private Exception? _disposeException;
+    private System.Runtime.ExceptionServices.ExceptionDispatchInfo? _disposeException;
 
     public Context(ContextOptions options)
         : this(options, SystemNetworkChangeSource.Instance)
@@ -257,7 +257,7 @@ public sealed class Context : IDisposable
             lock (_disposeGate)
             {
                 if (_disposeException is not null)
-                    ExceptionDispatchInfo.Capture(_disposeException).Throw();
+                    _disposeException.Throw();
             }
             return;
         }
@@ -283,7 +283,7 @@ public sealed class Context : IDisposable
             lock (_disposeGate)
             {
                 _disposed = true;
-                _disposeException = firstError?.SourceException;
+                _disposeException = firstError;
             }
             _disposeCompletedGate.Set();
         }
@@ -359,7 +359,10 @@ public sealed class Context : IDisposable
         {
             if (_disposed || _disposeInProgress)
                 throw new ObjectDisposedException(GetType().Name);
-            _nodes.Add(node);
+            lock (_nodesLock)
+            {
+                _nodes.Add(node);
+            }
         }
     }
 

@@ -1,8 +1,0 @@
-{"event":"start","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}
-{"event":"ready","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}
-{"event":"matched","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}
-{"event":"measure_start","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}
-{"event":"measure_done","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200,"main_thread_time_ns_available":true,"main_thread_time_ns_last":77000,"gc_used_memory_bytes_available":true,"gc_used_memory_bytes_last":7131136,"gc_allocated_in_frame_bytes_available":true,"gc_allocated_in_frame_bytes_last":163,"gc_allocated_in_frame_bytes_total":1671299,"gc_allocated_in_frame_bytes_samples":1110,"elapsed_ms":400.6254,"sent":200,"serialized_bytes_per_message":8201,"serialized_bytes":1640200,"messages_per_second":499.219470358095}
-{"event":"waiting_for_release","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}
-{"event":"released","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}
-{"event":"done","scenario":"unity-to-ros2-best-effort-8192","direction":"unity_to_ros2","qos":"best_effort","payload_bytes":8192,"messages":200}

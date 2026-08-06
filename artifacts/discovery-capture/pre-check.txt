@@ -1,6 +1,0 @@
-device: 5HF6OVWCDECMJZ59
-root: not-available (su not found)
-tcpdump: n/a (no root)
-igmp_239.255.0.1: not-checked (no root)
-host_tshark: TShark (Wireshark) 4.6.5 (Git commit b40c46f83867).
-host_tcpdump: tcpdump version 4.99.6

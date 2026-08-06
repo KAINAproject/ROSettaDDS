@@ -1,3 +1,0 @@
-Android tcpdump SKIPPED: root 取得不可 (Task 4)
-原因: ro.build.type=user + ro.debuggable=0
-代替: /proc/net/igmp で wlan0 の IGMP グループ参加状況を確認 (Task 4 済)

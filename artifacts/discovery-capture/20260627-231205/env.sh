@@ -1,2 +1,0 @@
-RUN_ID=20260627-231205
-RUN_DIR=artifacts/discovery-capture/20260627-231205

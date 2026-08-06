@@ -1,8 +1,0 @@
-{"event":"start","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}
-{"event":"ready","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}
-{"event":"matched","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}
-{"event":"measure_start","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}
-{"event":"measure_done","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500,"main_thread_time_ns_available":true,"main_thread_time_ns_last":89231,"gc_used_memory_bytes_available":true,"gc_used_memory_bytes_last":3010560,"gc_allocated_in_frame_bytes_available":true,"gc_allocated_in_frame_bytes_last":3352,"gc_allocated_in_frame_bytes_total":1769005,"gc_allocated_in_frame_bytes_samples":3677,"elapsed_ms":56.0762,"sent":500,"serialized_bytes_per_message":41,"serialized_bytes":20500,"messages_per_second":8916.43870305049}
-{"event":"waiting_for_release","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}
-{"event":"released","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}
-{"event":"done","scenario":"unity-to-ros2-reliable-32","direction":"unity_to_ros2","qos":"reliable","payload_bytes":32,"messages":500}

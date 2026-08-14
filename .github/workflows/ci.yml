@@ -7,6 +7,13 @@ on:
       - "codex/**"
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   dotnet:
     name: .NET
@@ -14,24 +21,88 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5.2.0
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/*.props', '**/*.targets', '**/nuget.config') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
 
       - name: Check Unity meta files
         run: bash .github/scripts/check_unity_meta.sh
 
       - name: Restore
-        run: dotnet restore rosettadds.sln
+        run: dotnet restore rosettadds.sln -p:Configuration=Release
 
       - name: Build
-        run: dotnet build rosettadds.sln --configuration Release --no-restore
+        run: |
+          set -euo pipefail
+          dotnet build rosettadds.sln \
+            --configuration Release \
+            --no-restore \
+            -p:ContinuousIntegrationBuild=true
+
+      - name: Check generated messages
+        run: |
+          set -euo pipefail
+          dotnet run \
+            --project tools/rosettadds-genmsg/rosettadds-genmsg.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            -- \
+            --input msgs \
+            --output src/rosettadds/Msgs \
+            --check
 
       - name: Test
-        run: dotnet test tests/rosettadds.Tests/rosettadds.Tests.csproj --configuration Release --no-build --verbosity normal
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/test-results
+          dotnet test tests/rosettadds.Tests/rosettadds.Tests.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            --logger trx \
+            --results-directory artifacts/test-results \
+            --verbosity normal
+          dotnet test tools/rosettadds-perf-runner.Tests/rosettadds-perf-runner.Tests.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            --logger trx \
+            --results-directory artifacts/test-results \
+            --verbosity normal
 
       - name: Pack
-        run: dotnet pack src/rosettadds/rosettadds.csproj --configuration Release --no-build --output artifacts/packages
+        run: |
+          set -euo pipefail
+          dotnet pack src/rosettadds/rosettadds.csproj \
+            --configuration Release \
+            --no-build \
+            --no-restore \
+            --output artifacts/packages
+
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results
+          path: artifacts/test-results
+          if-no-files-found: ignore
+
+      - name: Upload packages
+        if: ${{ !cancelled() && hashFiles('artifacts/packages/**') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packages
+          path: artifacts/packages
+          if-no-files-found: ignore
